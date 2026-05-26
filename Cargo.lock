@@ -839,6 +839,7 @@ dependencies = [
  "pollster 0.4.0",
  "ratatui",
  "rfd",
+ "rosc",
  "wgpu",
  "winit",
 ]
@@ -3201,6 +3202,16 @@ name = "rgb"
 version = "0.8.50"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57397d16646700483b67d2dd6511d79318f9d057fdbd21a4066aeac8b41d310a"
+
+[[package]]
+name = "rosc"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2e63d9e6b0d090be1485cf159b1e04c3973d2d3e1614963544ea2ff47a4a981"
+dependencies = [
+ "byteorder",
+ "nom",
+]
 
 [[package]]
 name = "rustc-hash"
