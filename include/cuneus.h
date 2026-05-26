@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -36,6 +37,7 @@ size_t cuneus_bin_count(void);
 const char* cuneus_bin_name(size_t index);
 
 CuneusInstance* cuneus_instance_open(const char* bin_name, const char* executable_dir, uint16_t remote_port);
+CuneusInstance* cuneus_instance_open_with_feedback(const char* bin_name, const char* executable_dir, uint16_t remote_port, uint16_t osc_feedback_port);
 void cuneus_instance_free(CuneusInstance* instance);
 
 const char* cuneus_last_error(void);
@@ -47,6 +49,8 @@ CuneusStatus cuneus_set_param_color3(CuneusInstance* instance, const char* id, f
 CuneusStatus cuneus_pulse(CuneusInstance* instance, float velocity);
 CuneusStatus cuneus_note(CuneusInstance* instance, float pitch, float velocity);
 CuneusStatus cuneus_set_transport(CuneusInstance* instance, float bpm, float beat, float measure);
+CuneusStatus cuneus_discover(CuneusInstance* instance);
+CuneusStatus cuneus_subscribe(CuneusInstance* instance, bool enabled);
 
 #ifdef __cplusplus
 }

@@ -1,4 +1,4 @@
-use cuneus::{Core, ShaderManager, UniformProvider, UniformBinding, RenderKit, ShaderControls, ExportManager};
+use cuneus::{cuneus_remote_bin, Core, ShaderManager, UniformProvider, UniformBinding, RenderKit, ShaderControls, ExportManager, RemoteControl};
 use cuneus::compute::{create_bind_group_layout, BindGroupLayoutType};
 use winit::event::WindowEvent;
 use std::path::PathBuf;
@@ -65,7 +65,18 @@ struct GaborShader {
     
     // Hot reload for shader
     hot_reload: cuneus::ShaderHotReload,
+    remote_control: Option<RemoteControl>,
 }
+cuneus_remote_bin!(
+    "gabor",
+    GaborParams,
+    f32: [
+        frequency, orientation, phase, speed, sigma_x, sigma_y, amplitude, aspect_ratio,
+        z_scale, rotation_x, rotation_y, brightness, color1_r, color1_g, color1_b,
+        color2_r, color2_g, color2_b, dof_amount, dof_focal_dist
+    ],
+    color3: []
+);
 
 impl GaborShader {
     fn recreate_compute_resources(&mut self, core: &Core) {
@@ -374,6 +385,7 @@ impl ShaderManager for GaborShader {
             atomic_buffer,
             frame_count: 0,
             hot_reload,
+            remote_control: RemoteControl::from_env(),
         };
         
         result.recreate_compute_resources(core);
@@ -435,6 +447,9 @@ impl ShaderManager for GaborShader {
         
         let mut params = self.params_uniform.data;
         let mut changed = false;
+        if let Some(remote_control) = &self.remote_control {
+            changed |= handle_remote_commands(remote_control, &mut params);
+        }
         let mut should_start_export = false;
         let mut export_request = self.base.export_manager.get_ui_request();
         let mut controls_request = self.base.controls.get_ui_request(
@@ -546,6 +561,9 @@ impl ShaderManager for GaborShader {
         if changed {
             self.params_uniform.data = params;
             self.params_uniform.update(&core.queue);
+            if let Some(remote_control) = &self.remote_control {
+                send_remote_values(remote_control, &params);
+            }
         }
         
         if should_start_export {

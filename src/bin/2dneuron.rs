@@ -1,4 +1,4 @@
-use cuneus::{Core, ShaderManager, UniformProvider, UniformBinding, RenderKit, TextureManager, create_feedback_texture_pair, ExportManager, ShaderHotReload, ShaderControls};
+use cuneus::{cuneus_remote_bin, Core, ShaderManager, UniformProvider, UniformBinding, RenderKit, TextureManager, create_feedback_texture_pair, ExportManager, ShaderHotReload, ShaderControls, RemoteControl};
 use winit::event::WindowEvent;
 use cuneus::ShaderApp;
 use cuneus::Renderer;
@@ -38,7 +38,9 @@ struct Shader {
     multi_texture_bind_group_layout: wgpu::BindGroupLayout,
     time_bind_group_layout: wgpu::BindGroupLayout,
     params_bind_group_layout: wgpu::BindGroupLayout,
+    remote_control: Option<RemoteControl>,
 }
+cuneus_remote_bin!("2dneuron", TreeParams, f32: [pixel_offset, pixel_offset2, lights, exp, frame, col1, col2, decay], color3: []);
 
 impl Shader {
     fn create_multi_texture_bind_group(
@@ -488,6 +490,7 @@ impl ShaderManager for Shader {
             multi_texture_bind_group_layout,
             time_bind_group_layout,
             params_bind_group_layout,
+            remote_control: RemoteControl::from_env(),
         }
     }
 
@@ -573,6 +576,9 @@ impl ShaderManager for Shader {
 
         let mut params = self.params_uniform.data;
         let mut changed = false;
+        if let Some(remote_control) = &self.remote_control {
+            changed |= handle_remote_commands(remote_control, &mut params);
+        }
         let mut should_start_export = false;
         let mut export_request = self.base.export_manager.get_ui_request();
         let mut controls_request = self.base.controls.get_ui_request(
@@ -644,6 +650,9 @@ impl ShaderManager for Shader {
         if changed {
             self.params_uniform.data = params;
             self.params_uniform.update(&core.queue);
+            if let Some(remote_control) = &self.remote_control {
+                send_remote_values(remote_control, &params);
+            }
         }
 
         if should_start_export {

@@ -1,4 +1,4 @@
-use cuneus::{Core, Renderer, ShaderApp, ShaderManager, UniformProvider, UniformBinding, RenderKit, ExportManager, ShaderHotReload, ShaderControls};
+use cuneus::{cuneus_remote_bin, Core, Renderer, ShaderApp, ShaderManager, UniformProvider, UniformBinding, RenderKit, ExportManager, ShaderHotReload, ShaderControls, RemoteControl};
 use winit::event::*;
 use std::path::PathBuf;
 #[repr(C)]
@@ -35,7 +35,14 @@ struct Shader {
     time_bind_group_layout: wgpu::BindGroupLayout,    
     resolution_bind_group_layout: wgpu::BindGroupLayout,
     params_bind_group_layout: wgpu::BindGroupLayout,
+    remote_control: Option<RemoteControl>,
 }
+cuneus_remote_bin!(
+    "asahi",
+    ShaderParams,
+    f32: [animation_speed],
+    color3: [color_petal_start_a, color_petal_end_a, color_petal_start_b, color_petal_end_b, bg_color]
+);
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     let (app, event_loop) = ShaderApp::new("asahi", 800, 600);
@@ -245,6 +252,7 @@ impl ShaderManager for Shader {
             time_bind_group_layout,
             resolution_bind_group_layout,
             params_bind_group_layout,
+            remote_control: RemoteControl::from_env(),
         }
     }
 
@@ -280,6 +288,9 @@ impl ShaderManager for Shader {
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut params = self.params_uniform.data;
         let mut changed = false;
+        if let Some(remote_control) = &self.remote_control {
+            changed |= handle_remote_commands(remote_control, &mut params);
+        }
         let mut should_start_export = false;
         let mut export_request = self.base.export_manager.get_ui_request();
         let mut controls_request = self.base.controls.get_ui_request(
@@ -335,6 +346,9 @@ impl ShaderManager for Shader {
         if changed {
             self.params_uniform.data = params;
             self.params_uniform.update(&core.queue);
+            if let Some(remote_control) = &self.remote_control {
+                send_remote_values(remote_control, &params);
+            }
         }
 
         if should_start_export {
@@ -388,4 +402,3 @@ impl ShaderManager for Shader {
         false
     }
 }
-

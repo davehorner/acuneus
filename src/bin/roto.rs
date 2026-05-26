@@ -1,4 +1,4 @@
-use cuneus::{Core,Renderer,ShaderApp, ShaderManager, UniformProvider, UniformBinding, RenderKit,ExportManager,ShaderHotReload,ShaderControls,RemoteCommand,RemoteControl};
+use cuneus::{params_for_bin, Core,Renderer,ShaderApp, ShaderManager, UniformProvider, UniformBinding, RenderKit,ExportManager,ShaderHotReload,ShaderControls,RemoteCommand,RemoteControl,RemoteValue};
 use winit::event::*;
 use std::path::PathBuf;
 
@@ -293,6 +293,15 @@ impl ShaderManager for Shader {
                             changed = true;
                         }
                     }
+                    RemoteCommand::Discover => {
+                        send_remote_discovery(remote_control, &params);
+                    }
+                    RemoteCommand::Subscribe { enabled } => {
+                        remote_control.set_feedback_enabled(enabled);
+                        if enabled {
+                            send_remote_discovery(remote_control, &params);
+                        }
+                    }
                     RemoteCommand::Pulse { .. } |
                     RemoteCommand::Note { .. } |
                     RemoteCommand::Transport { .. } => {}
@@ -348,6 +357,9 @@ impl ShaderManager for Shader {
         if changed {
             self.params_uniform.data = params;
             self.params_uniform.update(&core.queue);
+            if let Some(remote_control) = &self.remote_control {
+                send_remote_values(remote_control, &params);
+            }
         }
 
         if should_start_export {
@@ -412,4 +424,29 @@ fn apply_remote_f32(params: &mut ShaderParams, id: &str, value: f32) -> bool {
         _ => return false,
     }
     true
+}
+
+fn send_remote_discovery(remote_control: &RemoteControl, params: &ShaderParams) {
+    if let Some(specs) = params_for_bin("roto") {
+        remote_control.send_discovery("roto", specs);
+    }
+    send_remote_values(remote_control, params);
+}
+
+fn send_remote_values(remote_control: &RemoteControl, params: &ShaderParams) {
+    if let Some(specs) = params_for_bin("roto") {
+        remote_control.send_values(specs, |id| remote_value(params, id));
+    }
+}
+
+fn remote_value(params: &ShaderParams, id: &str) -> Option<RemoteValue> {
+    match id {
+        "square_size" => Some(RemoteValue::F32(params.square_size)),
+        "circle_radius" => Some(RemoteValue::F32(params.circle_radius)),
+        "edge_thickness" => Some(RemoteValue::F32(params.edge_thickness)),
+        "animation_speed" => Some(RemoteValue::F32(params.animation_speed)),
+        "background_color" => Some(RemoteValue::Color3(params.background_color)),
+        "edge_color_intensity" => Some(RemoteValue::F32(params.edge_color_intensity)),
+        _ => None,
+    }
 }

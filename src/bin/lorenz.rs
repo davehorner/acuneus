@@ -1,4 +1,5 @@
 use cuneus::prelude::*;
+use cuneus::{cuneus_remote_bin, RemoteControl};
 use winit::event::WindowEvent;
 use std::path::PathBuf;
 
@@ -63,7 +64,18 @@ struct LorenzShader {
     
     frame_count: u32,
     hot_reload: cuneus::ShaderHotReload,
+    remote_control: Option<RemoteControl>,
 }
+cuneus_remote_bin!(
+    "lorenz",
+    LorenzParams,
+    f32: [
+        sigma, rho, beta, step_size, motion_speed, rotation_x, rotation_y, brightness,
+        color1_r, color1_g, color1_b, color2_r, color2_g, color2_b, scale,
+        dof_amount, dof_focal_dist, gamma, exposure, particle_count
+    ],
+    color3: []
+);
 
 impl LorenzShader {
     fn recreate_compute_resources(&mut self, core: &Core) {
@@ -488,6 +500,7 @@ impl ShaderManager for LorenzShader {
             frame_count: 0,
             hot_reload,
             mouse_look_enabled: true,
+            remote_control: RemoteControl::from_env(),
         }
     }
     
@@ -550,6 +563,9 @@ impl ShaderManager for LorenzShader {
         // Handle UI interactions
         let mut params = self.params_uniform.data;
         let mut changed = false;
+        if let Some(remote_control) = &self.remote_control {
+            changed |= handle_remote_commands(remote_control, &mut params);
+        }
         let mut should_start_export = false;
         let mut export_request = self.base.export_manager.get_ui_request();
         let mut controls_request = self.base.controls.get_ui_request(
@@ -714,6 +730,9 @@ impl ShaderManager for LorenzShader {
         if changed {
             self.params_uniform.data = params;
             self.params_uniform.update(&core.queue);
+            if let Some(remote_control) = &self.remote_control {
+                send_remote_values(remote_control, &params);
+            }
         }
         
         if should_start_export {

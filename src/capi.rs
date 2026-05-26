@@ -6,6 +6,8 @@ use std::process::{Child, Command};
 use std::ptr;
 use std::sync::{Mutex, OnceLock};
 
+use crate::bin_registry::{params_for_bin, BinParamType, BINS};
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CuneusStatus {
@@ -42,39 +44,12 @@ pub struct CuneusInstance {
     child: Option<Child>,
 }
 
-struct ParamSpec {
-    id: &'static CStr,
-    label: &'static CStr,
-    param_type: CuneusParamType,
-    min_value: f32,
-    max_value: f32,
-    default_value: f32,
-    flags: u32,
-}
-
-macro_rules! cstr {
-    ($value:literal) => {
-        unsafe { CStr::from_bytes_with_nul_unchecked(concat!($value, "\0").as_bytes()) }
-    };
-}
-
-const ROTO_PARAMS: &[ParamSpec] = &[
-    ParamSpec { id: cstr!("square_size"), label: cstr!("Square Size"), param_type: CuneusParamType::F32, min_value: 0.05, max_value: 0.5, default_value: 0.2, flags: 0 },
-    ParamSpec { id: cstr!("circle_radius"), label: cstr!("Circle Radius"), param_type: CuneusParamType::F32, min_value: 0.05, max_value: 0.2, default_value: 0.11, flags: 0 },
-    ParamSpec { id: cstr!("edge_thickness"), label: cstr!("Edge Thickness"), param_type: CuneusParamType::F32, min_value: 0.001, max_value: 0.01, default_value: 0.003, flags: 0 },
-    ParamSpec { id: cstr!("animation_speed"), label: cstr!("Animation Speed"), param_type: CuneusParamType::F32, min_value: 1.0, max_value: 30.0, default_value: 12.0, flags: 0 },
-    ParamSpec { id: cstr!("background_color"), label: cstr!("Background Color"), param_type: CuneusParamType::Color3, min_value: 0.0, max_value: 1.0, default_value: 0.5, flags: 0 },
-    ParamSpec { id: cstr!("edge_color_intensity"), label: cstr!("Edge Brightness"), param_type: CuneusParamType::F32, min_value: 0.1, max_value: 2.0, default_value: 1.0, flags: 0 },
-];
-
-const BINS: &[&CStr] = &[cstr!("roto")];
-
 static LAST_ERROR: OnceLock<Mutex<CString>> = OnceLock::new();
 
-fn params_for_bin(bin_name: &str) -> Option<&'static [ParamSpec]> {
-    match bin_name {
-        "roto" => Some(ROTO_PARAMS),
-        _ => None,
+fn capi_param_type(param_type: BinParamType) -> CuneusParamType {
+    match param_type {
+        BinParamType::F32 => CuneusParamType::F32,
+        BinParamType::Color3 => CuneusParamType::Color3,
     }
 }
 
@@ -120,6 +95,16 @@ pub unsafe extern "C" fn cuneus_instance_open(
     executable_dir: *const c_char,
     remote_port: u16,
 ) -> *mut CuneusInstance {
+    cuneus_instance_open_with_feedback(bin_name, executable_dir, remote_port, 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cuneus_instance_open_with_feedback(
+    bin_name: *const c_char,
+    executable_dir: *const c_char,
+    remote_port: u16,
+    osc_feedback_port: u16,
+) -> *mut CuneusInstance {
     let Some(bin_name_string) = string_from_ptr(bin_name) else {
         set_last_error("bin_name is null or invalid utf-8");
         return ptr::null_mut();
@@ -148,10 +133,12 @@ pub unsafe extern "C" fn cuneus_instance_open(
         if cfg!(windows) {
             executable.set_extension("exe");
         }
-        match Command::new(&executable)
-            .env("CUNEUS_REMOTE_PORT", remote_port.to_string())
-            .spawn()
-        {
+        let mut command = Command::new(&executable);
+        command.env("CUNEUS_REMOTE_PORT", remote_port.to_string());
+        if osc_feedback_port != 0 {
+            command.env("CUNEUS_OSC_FEEDBACK_PORT", osc_feedback_port.to_string());
+        }
+        match command.spawn() {
             Ok(process) => child = Some(process),
             Err(error) => {
                 set_last_error(format!("failed to launch {}: {error}", executable.display()));
@@ -160,10 +147,11 @@ pub unsafe extern "C" fn cuneus_instance_open(
         }
     }
 
-    let bin_name_static = match bin_name_string.as_str() {
-        "roto" => "roto",
-        _ => unreachable!(),
-    };
+    let bin_name_static = params_for_bin(&bin_name_string)
+        .and(Some(bin_name_string.into_boxed_str()))
+        .map(Box::leak)
+        .map(|value| &*value)
+        .unwrap_or("roto");
 
     Box::into_raw(Box::new(CuneusInstance {
         bin_name: bin_name_static,
@@ -217,7 +205,7 @@ pub unsafe extern "C" fn cuneus_param_desc(
     *out_desc = CuneusParamDesc {
         id: param.id.as_ptr(),
         label: param.label.as_ptr(),
-        param_type: param.param_type,
+        param_type: capi_param_type(param.param_type),
         min_value: param.min_value,
         max_value: param.max_value,
         default_value: param.default_value,
@@ -285,4 +273,20 @@ pub unsafe extern "C" fn cuneus_set_transport(
         return CuneusStatus::Null;
     };
     send(instance, format!("transport {bpm} {beat} {measure}"))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cuneus_discover(instance: *mut CuneusInstance) -> CuneusStatus {
+    let Some(instance) = instance.as_ref() else {
+        return CuneusStatus::Null;
+    };
+    send(instance, "discover".to_string())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cuneus_subscribe(instance: *mut CuneusInstance, enabled: bool) -> CuneusStatus {
+    let Some(instance) = instance.as_ref() else {
+        return CuneusStatus::Null;
+    };
+    send(instance, format!("subscribe {}", if enabled { 1 } else { 0 }))
 }

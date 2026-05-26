@@ -24,6 +24,7 @@ mod export;
 mod hot;
 mod controls;
 mod atomic;
+mod bin_registry;
 mod capi;
 mod remote;
 #[cfg(feature = "media")]
@@ -47,10 +48,80 @@ pub use export::{ExportSettings, ExportManager, ExportError, ExportUiState, save
 pub use hot::ShaderHotReload;
 pub use controls::{ControlsRequest, ShaderControls};
 pub use atomic::AtomicBuffer;
-pub use remote::{RemoteCommand, RemoteControl};
+pub use bin_registry::{params_for_bin, BinParamSpec, BinParamType};
+pub use remote::{RemoteCommand, RemoteControl, RemoteValue};
 pub use mouse::*;
 pub use hdri::*;
 pub use font::{FontSystem, FontUniforms, CharInfo};
+
+#[macro_export]
+macro_rules! cuneus_remote_bin {
+    ($bin_name:literal, $params_ty:ty, f32: [$($f32_field:ident),* $(,)?], color3: [$($color3_field:ident),* $(,)?]) => {
+        fn handle_remote_commands(remote_control: &$crate::RemoteControl, params: &mut $params_ty) -> bool {
+            let mut changed = false;
+            for command in remote_control.drain() {
+                match command {
+                    $crate::RemoteCommand::SetF32 { id, value } => {
+                        match id.as_str() {
+                            $(stringify!($f32_field) => {
+                                if params.$f32_field != value {
+                                    params.$f32_field = value;
+                                    changed = true;
+                                }
+                            })*
+                            _ => {}
+                        }
+                    }
+                    $crate::RemoteCommand::SetColor3 { id, value } => {
+                        match id.as_str() {
+                            $(stringify!($color3_field) => {
+                                if params.$color3_field != value {
+                                    params.$color3_field = value;
+                                    changed = true;
+                                }
+                            })*
+                            _ => {}
+                        }
+                    }
+                    $crate::RemoteCommand::Discover => {
+                        send_remote_discovery(remote_control, params);
+                    }
+                    $crate::RemoteCommand::Subscribe { enabled } => {
+                        remote_control.set_feedback_enabled(enabled);
+                        if enabled {
+                            send_remote_discovery(remote_control, params);
+                        }
+                    }
+                    $crate::RemoteCommand::Pulse { .. } |
+                    $crate::RemoteCommand::Note { .. } |
+                    $crate::RemoteCommand::Transport { .. } => {}
+                }
+            }
+            changed
+        }
+
+        fn send_remote_discovery(remote_control: &$crate::RemoteControl, params: &$params_ty) {
+            if let Some(specs) = $crate::params_for_bin($bin_name) {
+                remote_control.send_discovery($bin_name, specs);
+            }
+            send_remote_values(remote_control, params);
+        }
+
+        fn send_remote_values(remote_control: &$crate::RemoteControl, params: &$params_ty) {
+            if let Some(specs) = $crate::params_for_bin($bin_name) {
+                remote_control.send_values(specs, |id| remote_value(params, id));
+            }
+        }
+
+        fn remote_value(params: &$params_ty, id: &str) -> Option<$crate::RemoteValue> {
+            match id {
+                $(stringify!($f32_field) => Some($crate::RemoteValue::F32(params.$f32_field)),)*
+                $(stringify!($color3_field) => Some($crate::RemoteValue::Color3(params.$color3_field)),)*
+                _ => None,
+            }
+        }
+    };
+}
 
 pub mod prelude {
     pub use crate::{
