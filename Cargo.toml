@@ -1,11 +1,11 @@
 [package]
-name = "cuneus"
-version = "0.2.1"
+name = "acuneus"
+version = "0.1.0"
 edition = "2021"
-authors = ["altunenes"]
-description = "A WGPU-based shader development tool"
+authors = ["davehorner"]
+description = "An OSC controllable WGSL shader runner and C ABI bridge for using Cuneus-style GPU examples from hosts such as BespokeSynth."
 license = "MIT"
-repository = "https://github.com/altunenes/cuneus"
+repository = "https://github.com/davehorner/acuneus"
 readme = "readme.md"
 keywords = ["graphics", "wgpu", "shaders", "gpu"]
 categories = ["graphics", "rendering"]
@@ -14,30 +14,34 @@ categories = ["graphics", "rendering"]
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
-wgpu = "24.0.1"
-winit = "0.30.11"
-bytemuck = { version = "1.21", features = ["derive"] }
-egui-wgpu = "0.31.1"
-egui = "0.31.1"
-egui-winit = "0.31.1"
-image = { version = "0.25.6", features = ["png", "hdr","exr"] }
+wgpu = "29.0.3"
+winit = "0.30.13"
+bytemuck = { version = "1.23.2", features = ["derive"] }
+egui-wgpu = "0.34.2"
+egui = "0.34.2"
+egui-winit = "0.34.2"
+image = { version = "0.25.8", features = ["png", "hdr", "exr"] }
 env_logger = "0.11.6"
 pollster = "0.4.0"
 rfd = "0.15.1"
-notify = "7.0.0"
-gstreamer = { version = "0.23.4", optional = true }
-gstreamer-video = { version = "0.23.4", optional = true }
-gstreamer-app = { version = "0.23.4", optional = true }
-gstreamer-pbutils = { version = "0.23.4", optional = true }
+notify = "8.2.0"
+gstreamer = { version = "0.25.2", optional = true }
+gstreamer-video = { version = "0.25.2", optional = true }
+gstreamer-app = { version = "0.25.2", optional = true }
+gstreamer-pbutils = { version = "0.25.2", optional = true }
 anyhow = "1.0.96"
 log = "0.4.25"
-fontdue = "0.9.0"
+ply-rs-bw = "=2.0.3"
 rosc = "0.10.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59.0", features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+] }
 
 [features]
 default = ["media"]
 media = ["gstreamer", "gstreamer-video", "gstreamer-app", "gstreamer-pbutils"]
 
 [dev-dependencies]
-crossterm = "0.28.1"
-ratatui = "0.29.0"

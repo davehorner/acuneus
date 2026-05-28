@@ -1,0 +1,372 @@
+use acuneus::compute::*;
+use acuneus::prelude::*;
+
+acuneus::uniform_params! {
+    struct RorschachParams {
+    seed: f32,
+    zoom: f32,
+    threshold: f32,
+    distortion: f32,
+
+    particle_speed: f32,
+    particle_life: f32,
+    trace_steps: f32,
+    contrast: f32,
+
+    color_r: f32,
+    color_g: f32,
+    color_b: f32,
+    gamma: f32,
+
+    style: f32,
+    fbm_octaves: f32,
+    tint_x: f32,
+    tint_y: f32,
+
+    tint_z: f32,
+    animate: f32,
+    turbulence: f32,
+    evaporation: f32,
+    light_intensity: f32,
+    _pad1: f32,
+    _pad2: f32,
+    _pad3: f32}
+}
+struct RorschachShader {
+    base: RenderKit,
+    compute_shader: ComputeShader,
+    current_params: RorschachParams,
+    remote: acuneus::remote::RemoteRuntime,
+}
+
+impl ShaderManager for RorschachShader {
+    fn init(core: &Core) -> Self {
+        let initial_params = RorschachParams {
+            seed: 87.0,
+            zoom: 5.2,
+            threshold: 0.383,
+            distortion: 2.63,
+            particle_speed: 0.45,
+            particle_life: 0.99,
+            trace_steps: 22.0,
+            contrast: 6.0,
+            color_r: 0.58,
+            color_g: 0.12,
+            color_b: 0.12,
+            gamma: 0.4,
+            style: 1.0,
+
+            fbm_octaves: 5.0,
+            tint_x: 0.3,
+            tint_y: 0.04,
+            tint_z: 0.28,
+
+            animate: 0.0,
+            turbulence: 1.2,
+            evaporation: 1.0,
+
+            light_intensity: 1.0,
+            _pad1: 0.0,
+            _pad2: 0.0,
+            _pad3: 0.0,
+        };
+        let base = RenderKit::new(core);
+
+        let passes = vec![
+            PassDescription::new("shape", &[]),
+            PassDescription::new("flow_field", &["shape"]),
+            PassDescription::new("ink_trace", &["ink_trace", "flow_field"]),
+            PassDescription::new("main_image", &["ink_trace"]),
+        ];
+
+        let config = ComputeShader::builder()
+            .with_entry_point("shape")
+            .with_multi_pass(&passes)
+            .with_custom_uniforms::<RorschachParams>()
+            .with_workgroup_size([16, 16, 1])
+            .with_texture_format(COMPUTE_TEXTURE_FORMAT_RGBA16)
+            .with_label("Rorschach Unified")
+            .build();
+
+        let compute_shader = acuneus::compute_shader!(core, "shaders/rorschach.wgsl", config);
+
+        compute_shader.set_custom_params(initial_params, &core.queue);
+
+        Self {
+            base,
+            compute_shader,
+            current_params: initial_params,
+            remote: acuneus::remote::RemoteRuntime::new("rorschach", 700, 500),
+        }
+    }
+
+    fn update(&mut self, core: &Core) {
+        self.compute_shader.handle_export(core, &mut self.base);
+
+        let current_time = self.remote.time(&self.base);
+        let delta = self.remote.delta();
+        self.compute_shader
+            .set_time(current_time, delta, &core.queue);
+    }
+
+    fn resize(&mut self, core: &Core) {
+        self.base.default_resize(core, &mut self.compute_shader);
+    }
+
+    fn render(&mut self, core: &Core) -> Result<(), acuneus::SurfaceError> {
+        let mut frame = self.base.begin_frame(core)?;
+
+        let mut params = self.current_params;
+        let mut changed = false;
+        changed |= self
+            .remote
+            .drain(core, &mut self.base, &mut self.compute_shader, &mut params);
+        let mut should_reset = false;
+        let mut should_start_export = false;
+        let mut export_request = self.base.export_manager.get_ui_request();
+        let remote_size = self.remote.resolution_size(core);
+        let mut controls_request = self.base.controls.get_ui_request(
+            &self.base.start_time,
+            &remote_size,
+            self.base.fps_tracker.fps(),
+        );
+        self.remote.apply_to_controls_request(&mut controls_request);
+
+        let full_output = if self.base.key_handler.show_ui {
+            self.base.render_ui(core, |ctx| {
+                ctx.global_style_mut(|style| {
+                    style.visuals.window_fill =
+                        egui::Color32::from_rgba_premultiplied(0, 0, 0, 180);
+                    style
+                        .text_styles
+                        .get_mut(&egui::TextStyle::Body)
+                        .unwrap()
+                        .size = 11.0;
+                    style
+                        .text_styles
+                        .get_mut(&egui::TextStyle::Button)
+                        .unwrap()
+                        .size = 10.0;
+                });
+
+                egui::Window::new("Rorschach")
+                    .collapsible(true)
+                    .resizable(true)
+                    .default_width(280.0)
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            let mut is_anim = params.animate > 0.5;
+                            if ui.checkbox(&mut is_anim, "dynamic").changed() {
+                                params.animate = if is_anim { 1.0 } else { 0.0 };
+                                params.evaporation = if is_anim { 0.992 } else { 1.0 };
+                                changed = true;
+                                should_reset = true;
+                            }
+                        });
+                        ui.separator();
+
+                        egui::CollapsingHeader::new("Shape")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut params.seed, 0.0..=100.0)
+                                            .text("Seed"),
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                    should_reset = true;
+                                }
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut params.zoom, 1.0..=10.0)
+                                            .text("Zoom"),
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                    should_reset = true;
+                                }
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut params.threshold, 0.3..=0.6)
+                                            .text("Ink Amount"),
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                    should_reset = true;
+                                }
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut params.distortion, 0.0..=3.0)
+                                            .text("Warping"),
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                    should_reset = true;
+                                }
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut params.fbm_octaves, 1.0..=25.0)
+                                            .text("Detail Octaves"),
+                                    )
+                                    .changed()
+                                {
+                                    params.fbm_octaves = params.fbm_octaves.round();
+                                    changed = true;
+                                    should_reset = true;
+                                }
+                            });
+
+                        egui::CollapsingHeader::new("Particle Tracer")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut params.particle_speed, 0.0..=5.0)
+                                            .text("Brush Speed"),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut params.trace_steps, 1.0..=100.0)
+                                            .text("Density/Steps"),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut params.particle_life, 0.8..=0.999)
+                                            .text("Trail Life"),
+                                    )
+                                    .changed();
+
+                                if params.animate > 0.5 {
+                                    changed |= ui
+                                        .add(
+                                            egui::Slider::new(&mut params.evaporation, 0.9..=1.0)
+                                                .text("Evaporation"),
+                                        )
+                                        .changed();
+                                    changed |= ui
+                                        .add(
+                                            egui::Slider::new(&mut params.turbulence, 0.0..=3.0)
+                                                .text("Turbulence"),
+                                        )
+                                        .changed();
+                                }
+                            });
+
+                        egui::CollapsingHeader::new("Visual Settings")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                ui.label("Primary Ink Color:");
+                                let mut color = [params.color_r, params.color_g, params.color_b];
+                                if ui.color_edit_button_rgb(&mut color).changed() {
+                                    params.color_r = color[0];
+                                    params.color_g = color[1];
+                                    params.color_b = color[2];
+                                    changed = true;
+                                }
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut params.contrast, 0.5..=6.0)
+                                            .text("Contrast"),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut params.gamma, 0.1..=2.0)
+                                            .text("Gamma"),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut params.style, 0.0..=1.0)
+                                            .text("Blend"),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut params.light_intensity, 0.1..=3.0)
+                                            .text("Light Intensity"),
+                                    )
+                                    .changed();
+
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    ui.label("Phase");
+                                    let mut tint_color =
+                                        [params.tint_x, params.tint_y, params.tint_z];
+                                    if ui.color_edit_button_rgb(&mut tint_color).changed() {
+                                        params.tint_x = tint_color[0];
+                                        params.tint_y = tint_color[1];
+                                        params.tint_z = tint_color[2];
+                                        changed = true;
+                                    }
+                                });
+                            });
+
+                        ui.separator();
+                        ShaderControls::render_controls_widget(ui, &mut controls_request);
+                        ui.separator();
+                        should_start_export =
+                            ExportManager::render_export_ui_widget(ui, &mut export_request);
+                        ui.separator();
+
+                        ui.horizontal(|ui| {
+                            ui.label(format!("Frame: {}", self.compute_shader.current_frame));
+                            if ui.button("Clear").clicked() {
+                                should_reset = true;
+                            }
+                        });
+                    });
+            })
+        } else {
+            self.base.render_ui(core, |_ctx| {})
+        };
+
+        if controls_request.should_clear_buffers || should_reset {
+            self.compute_shader.current_frame = 0;
+            self.compute_shader.time_uniform.data.frame = 0;
+            self.compute_shader.time_uniform.update(&core.queue);
+        }
+
+        self.compute_shader.dispatch(&mut frame.encoder, core);
+
+        self.base.renderer.render_to_view(
+            &mut frame.encoder,
+            &frame.view,
+            &self.compute_shader.get_output_texture().bind_group,
+        );
+
+        self.base.apply_control_request(controls_request);
+        self.base.export_manager.apply_ui_request(export_request);
+
+        if changed {
+            self.current_params = params;
+            self.compute_shader.set_custom_params(params, &core.queue);
+            self.remote.send_values(&params);
+        }
+
+        if should_start_export {
+            self.base.export_manager.start_export();
+        }
+
+        self.base.end_frame(core, frame, full_output);
+
+        Ok(())
+    }
+
+    fn handle_input(&mut self, core: &Core, event: &WindowEvent) -> bool {
+        self.base.default_handle_input(core, event)
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = env_logger::try_init();
+    let (app, event_loop) = ShaderApp::new("Rorschach Tracer", 700, 500);
+    app.run(event_loop, RorschachShader::init)
+}

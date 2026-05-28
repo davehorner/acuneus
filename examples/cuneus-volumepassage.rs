@@ -1,0 +1,246 @@
+use acuneus::compute::*;
+use acuneus::prelude::*;
+
+acuneus::uniform_params! {
+    struct VolumeParams {
+    speed: f32,
+    intensity: f32,
+    color1_r: f32,
+    color1_g: f32,
+    color1_b: f32,
+    color2_r: f32,
+    color2_g: f32,
+    color2_b: f32,
+    color3_r: f32,
+    color3_g: f32,
+    color3_b: f32,
+    gamma: f32,
+    zoom: f32,
+    _padding1: f32,
+    _padding2: f32,
+    _padding3: f32}
+}
+
+struct VolumeShader {
+    base: RenderKit,
+    compute_shader: ComputeShader,
+    current_params: VolumeParams,
+    remote: acuneus::remote::RemoteRuntime,
+}
+
+impl VolumeShader {
+    fn clear_buffers(&mut self, core: &Core) {
+        self.compute_shader.clear_all_buffers(core);
+    }
+}
+
+impl ShaderManager for VolumeShader {
+    fn init(core: &Core) -> Self {
+        let initial_params = VolumeParams {
+            speed: 1.0,
+            intensity: 0.001,
+            color1_r: 0.1,
+            color1_g: 0.3,
+            color1_b: 0.7,
+            color2_r: 0.8,
+            color2_g: 0.4,
+            color2_b: 0.2,
+            color3_r: 1.0,
+            color3_g: 1.0,
+            color3_b: 1.0,
+            gamma: 0.8,
+            zoom: 1.0,
+            _padding1: 0.0,
+            _padding2: 0.0,
+            _padding3: 0.0,
+        };
+
+        let base = RenderKit::new(core);
+
+        let config = ComputeShader::builder()
+            .with_entry_point("main")
+            .with_custom_uniforms::<VolumeParams>()
+            .with_workgroup_size([8, 8, 1])
+            .with_texture_format(COMPUTE_TEXTURE_FORMAT_RGBA16)
+            .with_label("Volume Passage Unified")
+            .build();
+
+        let compute_shader = acuneus::compute_shader!(core, "shaders/volumepassage.wgsl", config);
+
+        compute_shader.set_custom_params(initial_params, &core.queue);
+
+        Self {
+            base,
+            compute_shader,
+            current_params: initial_params,
+            remote: acuneus::remote::RemoteRuntime::new("volumepassage", 600, 300),
+        }
+    }
+
+    fn update(&mut self, core: &Core) {
+        // Handle export
+        self.compute_shader.handle_export(core, &mut self.base);
+    }
+
+    fn resize(&mut self, core: &Core) {
+        self.base.default_resize(core, &mut self.compute_shader);
+    }
+
+    fn render(&mut self, core: &Core) -> Result<(), acuneus::SurfaceError> {
+        let mut frame = self.base.begin_frame(core)?;
+
+        let mut params = self.current_params;
+        let mut changed = false;
+        changed |= self
+            .remote
+            .drain(core, &mut self.base, &mut self.compute_shader, &mut params);
+        let mut should_start_export = false;
+        let mut export_request = self.base.export_manager.get_ui_request();
+        let remote_size = self.remote.resolution_size(core);
+        let mut controls_request = self.base.controls.get_ui_request(
+            &self.base.start_time,
+            &remote_size,
+            self.base.fps_tracker.fps(),
+        );
+        self.remote.apply_to_controls_request(&mut controls_request);
+
+        let full_output = if self.base.key_handler.show_ui {
+            self.base.render_ui(core, |ctx| {
+                RenderKit::apply_default_style(ctx);
+
+                egui::Window::new("Volume Passage")
+                    .collapsible(true)
+                    .resizable(true)
+                    .default_width(250.0)
+                    .show(ctx, |ui| {
+                        egui::CollapsingHeader::new("Animation Settings")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut params.speed, 0.1..=3.0)
+                                            .text("Speed"),
+                                    )
+                                    .changed();
+                            });
+
+                        egui::CollapsingHeader::new("Visual Settings")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut params.intensity, 0.0001..=0.01)
+                                            .logarithmic(true)
+                                            .text("Intensity"),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut params.gamma, 0.1..=3.0)
+                                            .text("Gamma"),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut params.zoom, 0.1..=6.0).text("Zoom"),
+                                    )
+                                    .changed();
+                            });
+
+                        egui::CollapsingHeader::new("Colors")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("Color 1:");
+                                    let mut color =
+                                        [params.color1_r, params.color1_g, params.color1_b];
+                                    if ui.color_edit_button_rgb(&mut color).changed() {
+                                        params.color1_r = color[0];
+                                        params.color1_g = color[1];
+                                        params.color1_b = color[2];
+                                        changed = true;
+                                    }
+                                });
+
+                                ui.horizontal(|ui| {
+                                    ui.label("Color 2:");
+                                    let mut color =
+                                        [params.color2_r, params.color2_g, params.color2_b];
+                                    if ui.color_edit_button_rgb(&mut color).changed() {
+                                        params.color2_r = color[0];
+                                        params.color2_g = color[1];
+                                        params.color2_b = color[2];
+                                        changed = true;
+                                    }
+                                });
+
+                                ui.horizontal(|ui| {
+                                    ui.label("Color 3:");
+                                    let mut color =
+                                        [params.color3_r, params.color3_g, params.color3_b];
+                                    if ui.color_edit_button_rgb(&mut color).changed() {
+                                        params.color3_r = color[0];
+                                        params.color3_g = color[1];
+                                        params.color3_b = color[2];
+                                        changed = true;
+                                    }
+                                });
+                            });
+
+                        ui.separator();
+                        ShaderControls::render_controls_widget(ui, &mut controls_request);
+                        ui.separator();
+                        should_start_export =
+                            ExportManager::render_export_ui_widget(ui, &mut export_request);
+                    });
+            })
+        } else {
+            self.base.render_ui(core, |_ctx| {})
+        };
+
+        self.base.export_manager.apply_ui_request(export_request);
+        if controls_request.should_clear_buffers {
+            self.clear_buffers(core);
+        }
+        self.base.apply_control_request(controls_request);
+
+        let current_time = self.remote.time(&self.base);
+
+        let delta = self.remote.delta();
+        self.compute_shader
+            .set_time(current_time, delta, &core.queue);
+
+        if changed {
+            self.current_params = params;
+            self.compute_shader.set_custom_params(params, &core.queue);
+            self.remote.send_values(&params);
+        }
+
+        if should_start_export {
+            self.base.export_manager.start_export();
+        }
+
+        self.compute_shader.dispatch(&mut frame.encoder, core);
+
+        self.base.renderer.render_to_view(
+            &mut frame.encoder,
+            &frame.view,
+            &self.compute_shader.get_output_texture().bind_group,
+        );
+
+        self.base.end_frame(core, frame, full_output);
+
+        Ok(())
+    }
+
+    fn handle_input(&mut self, core: &Core, event: &WindowEvent) -> bool {
+        self.base.default_handle_input(core, event)
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = env_logger::try_init();
+    let (app, event_loop) = acuneus::ShaderApp::new("Volume Passage", 600, 300);
+
+    app.run(event_loop, VolumeShader::init)
+}

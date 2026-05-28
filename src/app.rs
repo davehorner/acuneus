@@ -1,11 +1,25 @@
 use crate::{Core, ShaderManager};
+use log::{error, info};
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "windows")]
+use winit::platform::windows::EventLoopBuilderExtWindows;
 use winit::{
-    event::*,
-    event_loop::{EventLoop, ActiveEventLoop},
-    window::WindowAttributes,
-    dpi::LogicalSize,
     application::ApplicationHandler,
+    dpi::LogicalSize,
+    event::*,
+    event_loop::{ActiveEventLoop, EventLoop},
+    window::WindowAttributes,
 };
+
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+pub fn clear_shutdown_request() {
+    SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+}
+
+pub fn request_shutdown() {
+    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+}
 
 pub struct ShaderApp {
     window_title: String,
@@ -15,7 +29,10 @@ pub struct ShaderApp {
 
 impl ShaderApp {
     pub fn new(window_title: &str, width: u32, height: u32) -> (Self, EventLoop<()>) {
-        let event_loop = EventLoop::builder()
+        let mut event_loop_builder = EventLoop::builder();
+        #[cfg(target_os = "windows")]
+        event_loop_builder.with_any_thread(true);
+        let event_loop = event_loop_builder
             .build()
             .expect("Failed to create event loop");
 
@@ -25,7 +42,7 @@ impl ShaderApp {
             window_size: (width, height),
             core: None,
         };
-        
+
         (app, event_loop)
     }
 
@@ -40,7 +57,7 @@ impl ShaderApp {
             shader: None,
             first_render: true,
         };
-        
+
         Ok(event_loop.run_app(&mut handler)?)
     }
 
@@ -59,8 +76,12 @@ struct ShaderAppHandler<S: ShaderManager> {
 
 impl<S: ShaderManager> ApplicationHandler for ShaderAppHandler<S> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        info!("creating shader window: {}", self.app.window_title);
         let window_attributes = WindowAttributes::default()
-            .with_inner_size(LogicalSize::new(self.app.window_size.0, self.app.window_size.1))
+            .with_inner_size(LogicalSize::new(
+                self.app.window_size.0,
+                self.app.window_size.1,
+            ))
             .with_title(&self.app.window_title)
             .with_resizable(true);
         let window = event_loop
@@ -73,8 +94,9 @@ impl<S: ShaderManager> ApplicationHandler for ShaderAppHandler<S> {
             let shader = shader_creator(&core);
             self.shader = Some(shader);
         }
-        
+
         self.app.core = Some(core);
+        info!("shader window initialized");
     }
 
     fn window_event(
@@ -85,48 +107,59 @@ impl<S: ShaderManager> ApplicationHandler for ShaderAppHandler<S> {
     ) {
         // Only process events if core and shader are initialized
         if let (Some(core), Some(shader)) = (&self.app.core, &mut self.shader) {
-            if window_id == core.window().id() {
-                if !shader.handle_input(core, &event) {
-                    match event {
-                        WindowEvent::CloseRequested => {
-                            event_loop.exit();
-                        }
-                        WindowEvent::Resized(size) => {
-                            if let Some(core) = &mut self.app.core {
-                                core.resize(size);
-                                shader.resize(core);
-                            }
-                        }
-                        WindowEvent::RedrawRequested => {
-                            shader.update(core);
-                            match shader.render(core) {
-                                Ok(_) => {
-                                    if self.first_render {
-                                        self.first_render = false;
-                                    }
-                                }
-                                Err(wgpu::SurfaceError::Lost) => {
-                                    if let Some(core) = &mut self.app.core {
-                                        core.resize(core.size);
-                                    }
-                                }
-                                Err(wgpu::SurfaceError::OutOfMemory) => event_loop.exit(),
-                                Err(e) => eprintln!("Render error: {:?}", e),
-                            }
-                        }
-                        _ => {}
+            if window_id == core.window().id() && !shader.handle_input(core, &event) {
+                match event {
+                    WindowEvent::CloseRequested => {
+                        info!("window close requested");
+                        event_loop.exit();
                     }
+                    WindowEvent::Resized(size) => {
+                        if let Some(core) = &mut self.app.core {
+                            if core.size == size {
+                                return;
+                            }
+                            core.resize(size);
+                            shader.resize(core);
+                        }
+                    }
+                    WindowEvent::RedrawRequested => {
+                        shader.update(core);
+                        match shader.render(core) {
+                            Ok(_) => {
+                                if self.first_render {
+                                    self.first_render = false;
+                                }
+                            }
+                            Err(crate::SurfaceError::SkipFrame) => {}
+                            Err(crate::SurfaceError::Lost | crate::SurfaceError::Outdated) => {
+                                if let Some(core) = &mut self.app.core {
+                                    core.resize(core.size);
+                                }
+                            }
+                            Err(crate::SurfaceError::OutOfMemory) => {
+                                error!("GPU out of memory, exiting");
+                                event_loop.exit();
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+            info!("shutdown requested");
+            event_loop.exit();
+            return;
+        }
+
         if let Some(core) = &self.app.core {
             core.window().request_redraw();
         }
     }
-    
+
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: StartCause) {
         // No special handling needed for new events
     }

@@ -1,75 +1,233 @@
-[![Shader Binary Release](https://github.com/altunenes/cuneus/actions/workflows/release.yaml/badge.svg)](https://github.com/altunenes/cuneus/actions/workflows/release.yaml) [![crates.io](https://img.shields.io/crates/v/Cuneus.svg)](https://crates.io/crates/Cuneus)
+# Acuneus
 
-<img src="https://github.com/user-attachments/assets/590dbd91-5eaa-4c04-b3f9-d579924fa4c3" alt="cuneus sdf" width="320" height="120" />
+Acuneus is a controllable WGSL shader runner and C ABI bridge for using Cuneus-style GPU examples from hosts such as BespokeSynth. It builds the shader examples, exposes their parameters through a stable C DLL, and lets an external host control the running window through OSC/UDP.
 
+The main goals are:
 
-A tool for experimenting with WGSL shaders, it uses `wgpu` for rendering, `egui` for the UI and `winit` for windowing :-)
+- Run shader examples standalone through the `acuneus` runner.
+- Run the same examples from a C host through `acuneus.dll`.
+- Keep the C catalog generated from Rust examples so it is easy to maintain.
+- Let BespokeSynth open, automate, and control Acuneus windows without embedding Bespoke-specific code into every example.
 
-### Current Features
+## What It Builds
 
-- Hot shader reloading
-- Compute & Fragment shader support 
-- Multi-pass, atomics etc
-- Interactive parameter adjustment, ez media imports through egui
-- Easily use HDR textures via UI
-- Easily use your own videos as textures (thanks to the `gstreamer`)
-- Audio/Visual synchronization: Spectrum and BPM detection via `gstreamer`
-- Export HQ frames via egui
+Acuneus produces:
 
+- `acuneus.dll`: the C ABI used by hosts.
+- `acuneus.exe`: the standalone runner.
+- Shader executables/examples such as `roto`, `cuneus-roto`, `cuneus-fluid`, and the rest of the generated catalog.
+- `include/acuneus.h` and `include/acuneus_capi.h`: public C headers.
+- `examples/generated/cuneus_examples.cmake`: generated list of examples for CMake consumers.
 
-## Current look
+The runner is always built. Its contents are configurable with `ACUNEUS_RUNNER_CONTENT`:
 
-  <a href="https://github.com/user-attachments/assets/25d47df4-45f5-4455-b2cf-ba673a8c081c">
-    <img src="https://github.com/user-attachments/assets/25d47df4-45f5-4455-b2cf-ba673a8c081c" width="300" alt="Cuneus IDE Interface"/>
-  </a>
+```powershell
+$env:ACUNEUS_RUNNER_CONTENT = "both"      # bins and examples
+$env:ACUNEUS_RUNNER_CONTENT = "bins"      # compiled bins only
+$env:ACUNEUS_RUNNER_CONTENT = "examples"  # embedded examples only
+```
 
-## Keys
+## Quick Start
 
-- `F` full screen/minimal screen, `H` hide egui
+Run a shader directly:
 
-#### Usage
+```powershell
+cargo run --bin acuneus -- roto
+```
 
-- If you want to try your own shaders, check out the [usage.md](usage.md).
-- **Optional Media Support**: GStreamer dependencies are optional - use `--no-default-features` for lightweight builds with pure GPU compute shaders.
-- **When using cuneus as a dependency** (via `cargo add`):
-  - Add `bytemuck = { version = "1", features = ["derive"] }` to dependencies (derive macros can't be re-exported)
-  - Copy [build.rs](build.rs) to your project root to configure `GStreamer` paths (only needed for media features)
-  - then simply use `use cuneus::prelude::*;`
+Run an example binary:
 
+```powershell
+cargo run --bin roto
+```
 
-#### Run examples
+Regenerate the C catalog after adding or changing examples:
 
-- `cargo run --release --bin *file*`
-- Or download on the [releases](https://github.com/altunenes/cuneus/releases)
-- Or, as the best method, use tui browser via ratatui (thanks to `davehorner`): 
-    
-     `cargo run --example tui_browser`
+```powershell
+cargo run --bin acuneus-gen_registry -- --write
+```
 
+Build the library and runner:
 
-# Gallery
+```powershell
+cargo build --release
+```
 
-| **Sinh** | **vertices** | **Satan** |
-|:---:|:---:|:---:|
-| <a href="https://github.com/user-attachments/assets/a80d2415-fbb2-4335-bbc3-b74b7a8170ad"><img src="https://github.com/user-attachments/assets/823a3def-b822-42ed-906b-e419fa490634" width="250"/></a><br/>[Code](https://github.com/altunenes/cuneus/blob/main/src/bin/sinh.rs) | <a href="https://github.com/user-attachments/assets/1847c374-5719-4fee-b74d-3418e5fa4d7b"><img src="https://github.com/user-attachments/assets/1847c374-5719-4fee-b74d-3418e5fa4d7b" width="250"/></a><br/>[Code](https://github.com/altunenes/cuneus/blob/main/src/bin/sdvert.rs) | <a href="https://github.com/user-attachments/assets/8f86a3b4-8d31-499f-b9fa-8b23266291ae"><img src="https://github.com/user-attachments/assets/8f86a3b4-8d31-499f-b9fa-8b23266291ae" width="250"/></a><br/>[Code](https://github.com/altunenes/cuneus/blob/main/src/bin/satan.rs) |
+## BespokeSynth
 
-| **PathTracing Mandelbulb** | **Lich** | **Galaxy** |
-|:---:|:---:|:---:|
-| <a href="https://github.com/user-attachments/assets/24083cae-7e96-4726-8509-fb3d5973308a"><img src="https://github.com/user-attachments/assets/e454b395-a1a0-4b91-a776-9afd1a789d23" width="250"/></a><br/>[Code](https://github.com/altunenes/cuneus/blob/main/src/bin/mandelbulb.rs) | <a href="https://github.com/user-attachments/assets/9589d2ec-43b8-4373-8dce-9cd2c74d862f"><img src="https://github.com/user-attachments/assets/9589d2ec-43b8-4373-8dce-9cd2c74d862f" width="250"/></a><br/>[Code](https://github.com/altunenes/cuneus/blob/main/src/bin/lich.rs) | <a href="https://github.com/user-attachments/assets/a2647904-55bd-4912-9713-4558203ee6aa"><img src="https://github.com/user-attachments/assets/a2647904-55bd-4912-9713-4558203ee6aa" width="250"/></a><br/>[Code](https://github.com/altunenes/cuneus/blob/main/src/bin/galaxy.rs) |
+The Bespoke side lives in `R:\w\cpp\BespokeSynth` as `Source/Acuneus.cpp` and `Source/Acuneus.h`.
 
-| **Buddhabrot** | **FFT(Butterworth filter)** | **Clifford** |
-|:---:|:---:|:---:|
-| <a href="https://github.com/user-attachments/assets/93a17f27-695a-4249-9ff8-be2742926358"><img src="https://github.com/user-attachments/assets/93a17f27-695a-4249-9ff8-be2742926358" width="250"/></a><br/>[Code](https://github.com/altunenes/cuneus/blob/main/src/bin/buddhabrot.rs) | <a href="https://github.com/user-attachments/assets/5806af3b-a640-433c-b7ec-1ca051412300"><img src="https://github.com/user-attachments/assets/e1e7f7e9-5979-43fe-8bb0-ccda8e428fe5" width="250"/></a><br/>[Code](https://github.com/altunenes/cuneus/blob/main/src/bin/fft.rs) | <a href="https://github.com/user-attachments/assets/8b078f40-a989-4d07-bb2f-d19d8232cc9f"><img src="https://github.com/user-attachments/assets/8b078f40-a989-4d07-bb2f-d19d8232cc9f" width="250"/></a><br/>[Code](https://github.com/altunenes/cuneus/blob/main/src/bin/cliffordcompute.rs) |
+The Acuneus module can:
 
+- Select any generated shader from the dropdown.
+- Open/close an out-of-process Acuneus window.
+- Optionally run embedded through the C DLL.
+- Auto reopen when the shader dropdown changes.
+- Show generated parameter sliders with readable labels.
+- Automate overlay, title bar, window position, scale, time, FPS, and render resolution.
+- Remember per-shader window position, scale, and resolution.
+- Control Bespoke transport bidirectionally for remote-aware shaders such as `roto`.
 
-| **orbits** | **hilbert room** | **genuary6** |
-|:---:|:---:|:---:|
-| <a href="https://github.com/user-attachments/assets/54dcd781-30af-46fb-aeda-2d2d607b0742"><img src="https://github.com/user-attachments/assets/951b30d6-6f8d-4fc7-884f-eec496fb3885" width="250"/></a><br/>[Code](https://github.com/altunenes/cuneus/blob/main/src/bin/orbits.rs) | <a href="https://github.com/user-attachments/assets/bc596e6b-9304-48ba-b509-140544450f5d"><img src="https://github.com/user-attachments/assets/bc596e6b-9304-48ba-b509-140544450f5d" width="250"/></a><br/>[Code](https://github.com/altunenes/cuneus/blob/main/src/bin/hilbert.rs) | <a href="https://github.com/user-attachments/assets/be2e132a-a473-462d-8b5b-2277336c7e78"><img src="https://github.com/user-attachments/assets/be2e132a-a473-462d-8b5b-2277336c7e78" width="250"/></a><br/>[Code](https://github.com/altunenes/cuneus/blob/main/src/bin/genuary2025_6.rs) |
+From the BespokeSynth repo, test with:
 
+```powershell
+task run
+```
 
-| **water** | **path tracer** | **audio visualizer** |
-|:---:|:---:|:---:|
-| <a href="https://github.com/user-attachments/assets/465dae75-2bbc-4b4e-8384-054cfdf9f129"><img src="https://github.com/user-attachments/assets/dbcc8c37-4cf0-4c46-99f0-2f33ceed395b" width="250" height ="200"/></a><br/>[Code](https://github.com/altunenes/cuneus/blob/main/src/bin/water.rs) | <a href="https://github.com/user-attachments/assets/45b8f532-f3fb-453c-b356-1d3c153d614a"><img src="https://github.com/user-attachments/assets/896228c3-7583-40de-9643-8b58aaec6050" width="250"/></a><br/>[Code](https://github.com/altunenes/cuneus/blob/main/src/bin/pathtracing.rs) | <a href="https://github.com/user-attachments/assets/3eda9c33-7961-4dd4-aad1-170ae32640e7"><img src="https://github.com/user-attachments/assets/3eda9c33-7961-4dd4-aad1-170ae32640e7" width="250"/></a><br/>[Code](https://github.com/altunenes/cuneus/blob/main/src/bin/audiovis.rs) |
+## C ABI
 
-| **Poe2:loading** | **tree** | **voronoi** |
-|:---:|:---:|:---:|
-| <a href="https://github.com/user-attachments/assets/fa588334-dd8d-492d-9caa-1aaeaecf024b"><img src="https://github.com/user-attachments/assets/fa588334-dd8d-492d-9caa-1aaeaecf024b" width="250"/></a><br/>[Code](https://github.com/altunenes/cuneus/blob/main/src/bin/poe2.rs) | <a href="https://github.com/user-attachments/assets/2f0bdc7c-d226-4091-bae7-b96561c1fb4f"><img src="https://github.com/user-attachments/assets/2f0bdc7c-d226-4091-bae7-b96561c1fb4f" width="250"/></a><br/>[Code](https://github.com/altunenes/cuneus/blob/main/src/bin/tree.rs) | <a href="https://github.com/user-attachments/assets/6c68d718-872c-4e14-bccb-f2339cf121d2"><img src="https://github.com/user-attachments/assets/6c68d718-872c-4e14-bccb-f2339cf121d2" width="250"/></a><br/>[Code](https://github.com/altunenes/cuneus/blob/main/src/bin/voronoi.rs) |
+The C ABI is declared in `include/acuneus.h`. The exported type names still use the existing `Cuneus*` ABI names for compatibility with the current host code, but the project, headers, runner, and Bespoke module are Acuneus-specific.
+
+Important entry points:
+
+```c
+size_t cuneus_bin_count(void);
+const char* cuneus_bin_name(size_t index);
+bool cuneus_bin_default_dimensions(const char* bin_name, uint32_t* out_width, uint32_t* out_height);
+
+CuneusInstance* cuneus_instance_open_with_feedback(
+    const char* bin_name,
+    const char* executable_dir,
+    uint16_t remote_port,
+    uint16_t osc_feedback_port);
+
+CuneusStatus cuneus_set_param_f32(CuneusInstance* instance, const char* id, float value);
+CuneusStatus cuneus_set_param_color3(CuneusInstance* instance, const char* id, float r, float g, float b);
+CuneusStatus cuneus_set_transport(CuneusInstance* instance, float bpm, float beat, float measure);
+
+CuneusStatus cuneus_set_overlay_visible(CuneusInstance* instance, bool visible);
+CuneusStatus cuneus_set_window_title(CuneusInstance* instance, const char* title);
+CuneusStatus cuneus_set_window_title_bar_visible(CuneusInstance* instance, bool visible);
+CuneusStatus cuneus_set_window_position(CuneusInstance* instance, int32_t x, int32_t y);
+CuneusStatus cuneus_set_window_scale(CuneusInstance* instance, float scale);
+CuneusStatus cuneus_set_window_size(CuneusInstance* instance, uint32_t width, uint32_t height);
+CuneusStatus cuneus_set_time(CuneusInstance* instance, float time_seconds);
+CuneusStatus cuneus_set_fps(CuneusInstance* instance, float fps);
+CuneusStatus cuneus_set_resolution(CuneusInstance* instance, uint32_t width, uint32_t height);
+```
+
+On Windows, Acuneus launches child processes without opening a console window. The C DLL can also move and resize out-of-process child windows directly, so host-side window control works even when a shader does not yet implement every remote command internally.
+
+## OSC And UDP
+
+Acuneus uses a strict OSC namespace:
+
+```text
+/acuneus/cuneus/*
+```
+
+There is no legacy `/cuneus/*` compatibility path.
+
+Common incoming OSC addresses:
+
+```text
+/acuneus/cuneus/discover
+/acuneus/cuneus/subscribe
+/acuneus/cuneus/param/<id>
+/acuneus/cuneus/color/<id>
+/acuneus/cuneus/pulse
+/acuneus/cuneus/note
+/acuneus/cuneus/transport
+/acuneus/cuneus/overlay
+/acuneus/cuneus/overlay/toggle
+/acuneus/cuneus/window/title
+/acuneus/cuneus/window/titlebar
+/acuneus/cuneus/window/titlebar/hide
+/acuneus/cuneus/window/position
+/acuneus/cuneus/window/scale
+/acuneus/cuneus/window/size
+/acuneus/cuneus/time
+/acuneus/cuneus/fps
+/acuneus/cuneus/resolution
+```
+
+Common feedback addresses:
+
+```text
+/acuneus/cuneus/status
+/acuneus/cuneus/bin
+/acuneus/cuneus/param_count
+/acuneus/cuneus/param_desc
+/acuneus/cuneus/param/<id>
+/acuneus/cuneus/transport
+/acuneus/cuneus/transport/tempo
+/acuneus/cuneus/transport/play
+/acuneus/cuneus/transport/reset
+/acuneus/cuneus/transport/shift_beats
+```
+
+The C ABI sends simple UDP text commands to the runner, and remote-aware examples accept both those text commands and OSC packets.
+
+## Generated Catalog
+
+The catalog is generated from files in `examples/`. The generator scans each example for:
+
+- The example name.
+- `uniform_params!` fields.
+- Slider labels/ranges/defaults.
+- Color labels.
+- The example's desired default window dimensions from `ShaderApp::new(...)`.
+
+Generated files include:
+
+- `src/bin_registry.rs`
+- `src/embedded_generated.rs`
+- `examples/generated/cuneus_examples.cmake`
+
+Run the generator whenever examples or their parameter metadata change:
+
+```powershell
+cargo run --bin acuneus-gen_registry -- --write
+```
+
+## Adding Remote Support To An Example
+
+Use `RemoteControl::from_env()` in the example and drain `RemoteCommand` values each frame. At minimum, handle generated params and the shared UI/window controls:
+
+```rust
+match command {
+    RemoteCommand::SetF32 { id, value } => { /* update param */ }
+    RemoteCommand::SetColor3 { id, value } => { /* update color param */ }
+    RemoteCommand::OverlayVisible { visible } => {
+        self.base.key_handler.show_ui = visible;
+    }
+    RemoteCommand::TitleBarVisible { visible } => {
+        core.window().set_decorations(visible);
+    }
+    RemoteCommand::WindowTitle { title } => {
+        core.window().set_title(&title);
+    }
+    RemoteCommand::WindowPosition { x, y } => {
+        core.window().set_outer_position(acuneus::winit::dpi::PhysicalPosition::new(x, y));
+    }
+    RemoteCommand::WindowScale { scale } => { /* resize from native dimensions */ }
+    RemoteCommand::WindowSize { width, height } => { /* request window size */ }
+    RemoteCommand::Time { seconds } => { /* drive shader time */ }
+    RemoteCommand::Fps { fps } => { /* drive delta */ }
+    RemoteCommand::Resolution { width, height } => { /* resize render target */ }
+    _ => {}
+}
+```
+
+`roto` is the reference example for the full remote path.
+
+## Keyboard
+
+- `F`: fullscreen/minimal screen.
+- `H`: toggle the in-window overlay.
+
+## Dependencies
+
+- Rust stable.
+- A GPU supported by `wgpu`.
+- GStreamer is used by media-capable shaders and is enabled by default.
+
+Build without media support when you only need pure GPU compute examples:
+
+```powershell
+cargo build --release --no-default-features
+```
+
+## Project Notes
+
+Acuneus is still built on the original Cuneus shader engine concepts: WGSL compute shaders, `wgpu`, `winit`, `egui`, hot reload, multi-pass compute, atomics, media textures, audio analysis, and export support. The Acuneus layer is the hostable, generator-driven runner and C bridge around that engine.

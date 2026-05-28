@@ -1,166 +1,264 @@
+use log::debug;
 use std::sync::Arc;
 use winit::window::Window;
 
+extern crate self as acuneus;
+extern crate self as cuneus;
+
+pub use anyhow;
+pub use bytemuck;
+pub use egui;
+pub use env_logger;
 pub use wgpu;
 pub use winit;
-pub use egui;
-pub use bytemuck;
-pub use anyhow;
-pub use env_logger;
 
-pub use winit::event::WindowEvent;
-pub use wgpu::SurfaceError;
 pub use bytemuck::{Pod, Zeroable};
+pub use winit::event::WindowEvent;
 
-mod renderer;
-mod shader;
-mod texture;
-mod uniforms;
+/// Represents surface acquisition failures during rendering.
+#[derive(Debug)]
+pub enum SurfaceError {
+    /// Surface texture not available this frame (timeout or occluded).
+    SkipFrame,
+    /// Surface needs reconfiguration.
+    Outdated,
+    /// Surface or device lost.
+    Lost,
+    /// GPU out of memory.
+    OutOfMemory,
+}
+
+impl std::fmt::Display for SurfaceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SkipFrame => write!(f, "Surface not ready, skip frame"),
+            Self::Outdated => write!(f, "Surface outdated"),
+            Self::Lost => write!(f, "Surface lost"),
+            Self::OutOfMemory => write!(f, "Out of memory"),
+        }
+    }
+}
+
+impl std::error::Error for SurfaceError {}
+
 mod app;
-mod renderkit;
-mod feedback; 
-mod keyinputs;
-mod export;
-mod hot;
-mod controls;
-mod atomic;
 mod bin_registry;
 mod capi;
-mod remote;
+pub mod compute;
+mod controls;
+pub mod embedded;
+mod embedded_generated;
+mod export;
+mod font;
+mod fps;
+pub mod gaussian;
 #[cfg(feature = "media")]
 pub mod gst;
-pub mod compute;
-mod spectrum;
-mod fps;
-mod mouse;
 pub mod hdri;
-mod font;
-
+mod hot;
+mod keyinputs;
+mod mouse;
+pub mod ply;
+pub mod radix_sort;
+pub mod remote;
+mod renderer;
+mod renderkit;
+mod shader;
+mod spectrum;
+mod texture;
+mod uniforms;
+pub use app::*;
+pub use controls::{ControlsRequest, ShaderControls};
+pub use export::{save_frame, ExportError, ExportManager, ExportSettings, ExportUiState};
+pub use font::{CharInfo, FontSystem, FontUniforms};
+pub use gaussian::*;
+pub use hdri::*;
+pub use hot::ShaderHotReload;
+pub use keyinputs::KeyInputHandler;
+pub use mouse::*;
+pub use ply::*;
 pub use renderer::*;
+pub use renderkit::*;
 pub use shader::*;
 pub use texture::*;
 pub use uniforms::*;
-pub use app::*;
-pub use renderkit::*;
-pub use feedback::*;
-pub use keyinputs::KeyInputHandler;
-pub use export::{ExportSettings, ExportManager, ExportError, ExportUiState, save_frame};
-pub use hot::ShaderHotReload;
-pub use controls::{ControlsRequest, ShaderControls};
-pub use atomic::AtomicBuffer;
-pub use bin_registry::{params_for_bin, BinParamSpec, BinParamType};
-pub use remote::{RemoteCommand, RemoteControl, RemoteValue};
-pub use mouse::*;
-pub use hdri::*;
-pub use font::{FontSystem, FontUniforms, CharInfo};
-
-#[macro_export]
-macro_rules! cuneus_remote_bin {
-    ($bin_name:literal, $params_ty:ty, f32: [$($f32_field:ident),* $(,)?], color3: [$($color3_field:ident),* $(,)?]) => {
-        fn handle_remote_commands(remote_control: &$crate::RemoteControl, params: &mut $params_ty) -> bool {
-            let mut changed = false;
-            for command in remote_control.drain() {
-                match command {
-                    $crate::RemoteCommand::SetF32 { id, value } => {
-                        match id.as_str() {
-                            $(stringify!($f32_field) => {
-                                if params.$f32_field != value {
-                                    params.$f32_field = value;
-                                    changed = true;
-                                }
-                            })*
-                            _ => {}
-                        }
-                    }
-                    $crate::RemoteCommand::SetColor3 { id, value } => {
-                        match id.as_str() {
-                            $(stringify!($color3_field) => {
-                                if params.$color3_field != value {
-                                    params.$color3_field = value;
-                                    changed = true;
-                                }
-                            })*
-                            _ => {}
-                        }
-                    }
-                    $crate::RemoteCommand::Discover => {
-                        send_remote_discovery(remote_control, params);
-                    }
-                    $crate::RemoteCommand::Subscribe { enabled } => {
-                        remote_control.set_feedback_enabled(enabled);
-                        if enabled {
-                            send_remote_discovery(remote_control, params);
-                        }
-                    }
-                    $crate::RemoteCommand::Pulse { .. } |
-                    $crate::RemoteCommand::Note { .. } |
-                    $crate::RemoteCommand::Transport { .. } => {}
-                }
-            }
-            changed
-        }
-
-        fn send_remote_discovery(remote_control: &$crate::RemoteControl, params: &$params_ty) {
-            if let Some(specs) = $crate::params_for_bin($bin_name) {
-                remote_control.send_discovery($bin_name, specs);
-            }
-            send_remote_values(remote_control, params);
-        }
-
-        fn send_remote_values(remote_control: &$crate::RemoteControl, params: &$params_ty) {
-            if let Some(specs) = $crate::params_for_bin($bin_name) {
-                remote_control.send_values(specs, |id| remote_value(params, id));
-            }
-        }
-
-        fn remote_value(params: &$params_ty, id: &str) -> Option<$crate::RemoteValue> {
-            match id {
-                $(stringify!($f32_field) => Some($crate::RemoteValue::F32(params.$f32_field)),)*
-                $(stringify!($color3_field) => Some($crate::RemoteValue::Color3(params.$color3_field)),)*
-                _ => None,
-            }
-        }
+#[cfg(feature = "media")]
+pub mod audio {
+    pub use crate::gst::audio::{
+        AudioDataProvider, AudioSynthManager, AudioSynthUniform, AudioWaveform, EnvelopeConfig,
+        MusicalNote, PcmStreamManager, SynthesisManager, SynthesisUniform, SynthesisWaveform,
     };
 }
+// pub use app::*;
+// pub use renderkit::*;
+// pub use feedback::*;
+// pub use keyinputs::KeyInputHandler;
+// pub use export::{ExportSettings, ExportManager, ExportError, ExportUiState, save_frame};
+// pub use hot::ShaderHotReload;
+// pub use controls::{ControlsRequest, ShaderControls};
+// pub use atomic::AtomicBuffer;
+// pub use mouse::*;
+// pub use hdri::*;
+// pub use font::{FontSystem, FontUniforms, CharInfo};
 
 pub mod prelude {
     pub use crate::{
-        Core, ShaderApp, ShaderManager,
-        UniformProvider, UniformBinding, 
-        RenderKit, ShaderControls, ExportManager, ShaderHotReload,
-        TextureManager, Renderer, AtomicBuffer,
-        KeyInputHandler, ControlsRequest, FontSystem, FontUniforms,
-        save_frame, compute::create_bind_group_layout,compute::BindGroupLayoutType
+        compute::ComputeShader, compute::ComputeShaderBuilder, compute::MultiPassManager,
+        compute::PassDescription, compute::StorageBufferSpec,
+        compute::COMPUTE_TEXTURE_FORMAT_RGBA16, compute::COMPUTE_TEXTURE_FORMAT_RGBA8, save_frame,
+        CharInfo, ControlsRequest, Core, ExportManager, FontSystem, FontUniforms, FrameContext,
+        KeyInputHandler, RenderKit, Renderer, ShaderApp, ShaderControls, ShaderHotReload,
+        ShaderManager, TextureManager, UniformBinding, UniformProvider,
     };
-    
+
     #[cfg(feature = "media")]
     pub use crate::{
-        gst
+        audio::{
+            AudioWaveform, MusicalNote, PcmStreamManager, SynthesisManager, SynthesisUniform,
+            SynthesisWaveform,
+        },
+        gst,
     };
-    
+
+    pub use crate::anyhow;
+    pub use crate::bytemuck;
+    pub use crate::egui;
     pub use crate::wgpu;
     pub use crate::winit;
-    pub use crate::egui;
-    pub use crate::bytemuck;
-    pub use crate::anyhow;
-    
-    pub use env_logger;
-    pub use crate::WindowEvent;
+
     pub use crate::SurfaceError;
-    
-    pub use bytemuck::{Pod, Zeroable, bytes_of, cast_slice};
+    pub use crate::WindowEvent;
+    pub use env_logger;
+
+    pub use bytemuck::{bytes_of, cast_slice, Pod, Zeroable};
     pub use wgpu::{
-        Device, Queue, Surface, SurfaceConfiguration,
-        TextureFormat, RenderPipeline, ComputePipeline,
-        BindGroup, BindGroupLayout, Buffer,
-        ShaderModule, TextureView,
+        BindGroup, BindGroupLayout, Buffer, ComputePipeline, Device, Queue, RenderPipeline,
+        ShaderModule, Surface, SurfaceConfiguration, TextureFormat, TextureView,
     };
-    
-    pub use winit::{
-        event_loop::EventLoop,
-        window::Window,
-        dpi::PhysicalSize,
+
+    pub use winit::{dpi::PhysicalSize, event_loop::EventLoop, window::Window};
+}
+
+/// a macro for defining GPU uniform parameter structs.
+///
+/// Automatically adds `#[repr(C)]`, `Copy`, `Clone`, `Debug`, `Pod`, `Zeroable`,
+/// implements `UniformProvider`, and asserts 16-byte alignment at compile time.
+///
+/// ```rust,no_run
+/// acuneus::uniform_params! {
+///     pub struct MyParams {
+///         field1: f32,
+///         field2: f32,
+///         _padding: [f32; 2],
+///     }
+/// }
+/// ```
+#[macro_export]
+macro_rules! uniform_params {
+    (
+        $(#[$meta:meta])*
+        $vis:vis struct $name:ident {
+            $($field_vis:vis $field:ident : $ty:ty),* $(,)?
+        }
+    ) => {
+        #[repr(C)]
+        #[derive(Copy, Clone, Debug)]
+        $(#[$meta])*
+        $vis struct $name {
+            $($field_vis $field : $ty),*
+        }
+
+        // Hand implement Pod/Zeroable via the re-exported traits. The derive
+        // macros from `bytemuck_derive` emit unqualified `bytemuck::` paths
+        // that require consumers to depend on bytemuck themselves; trait
+        // impls accept the full `$crate::bytemuck::...` path, so consumers
+        // need only depend on cuneus.
+        //
+        // Safety: `#[repr(C)]` + `Copy` are required above; the 16-byte size
+        // assert below catches padding-related mistakes. Callers are
+        // responsible for using only Pod field types (no references,
+        // pointers, enums, etc etc...).
+        unsafe impl $crate::bytemuck::Zeroable for $name {}
+        unsafe impl $crate::bytemuck::Pod for $name {}
+
+        impl $crate::UniformProvider for $name {
+            fn as_bytes(&self) -> &[u8] {
+                $crate::bytemuck::bytes_of(self)
+            }
+        }
+
+        impl $crate::remote::RemoteUniform for $name {
+            fn apply_remote_value(&mut self, id: &str, value: $crate::remote::RemoteValue) -> bool {
+                match id {
+                    $(
+                        stringify!($field) => {
+                            $crate::remote::RemoteField::apply_remote_field(&mut self.$field, value)
+                        }
+                    ),*
+                    ,
+                    _ => false,
+                }
+            }
+
+            fn remote_value(&self, id: &str) -> Option<$crate::remote::RemoteValue> {
+                match id {
+                    $(
+                        stringify!($field) => {
+                            $crate::remote::RemoteField::remote_value(&self.$field)
+                        }
+                    ),*
+                    ,
+                    _ => None,
+                }
+            }
+        }
+
+        const _: () = {
+            assert!(
+                ::core::mem::size_of::<$name>() % 16 == 0,
+                concat!(
+                    "uniform_params!: struct `",
+                    stringify!($name),
+                    "` size must be a multiple of 16 bytes (add padding fields)"
+                )
+            );
+        };
     };
+}
+
+/// Create a compute shader with automatic hot reload.
+///
+/// Uses `file!()` at compile time to derive the correct hot reload path,
+/// so the shader file path is only specified once.
+///
+/// ```rust,no_run
+/// let config = ComputeShader::builder()
+///     .with_entry_point("main")
+///     .with_custom_uniforms::<MyParams>()
+///     .build();
+///
+/// let compute_shader = acuneus::compute_shader!(core, "shaders/my_shader.wgsl", config);
+/// ```
+#[macro_export]
+macro_rules! compute_shader {
+    ($core:expr, $shader_path:literal, $config:expr) => {{
+        let mut config = $config;
+        let caller_file = file!();
+        let caller_dir = match caller_file.rfind('/') {
+            Some(pos) => &caller_file[..pos],
+            None => match caller_file.rfind('\\') {
+                Some(pos) => &caller_file[..pos],
+                None => "",
+            },
+        };
+        let hot_reload_path = if caller_dir.is_empty() {
+            $shader_path.to_string()
+        } else {
+            format!("{}/{}", caller_dir, $shader_path)
+        };
+        config.hot_reload_path = Some(std::path::PathBuf::from(hot_reload_path));
+        $crate::compute::ComputeShader::from_builder($core, include_str!($shader_path), config)
+    }};
 }
 
 pub struct Core {
@@ -174,34 +272,34 @@ pub struct Core {
 impl Core {
     pub async fn new(window: Window) -> Self {
         let size = window.inner_size();
-        let instance_desc = wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::DX12,
-            backend_options: wgpu::BackendOptions::default(),
-            ..Default::default()
-        };
-        let instance = wgpu::Instance::new(&instance_desc);
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let window_box = Box::new(window);
         let window_ptr = Box::into_raw(window_box);
         // SAFETY: window_ptr is valid as we just created it
         let surface = unsafe { instance.create_surface(&*window_ptr) }.unwrap();
+        let adapters = instance.enumerate_adapters(wgpu::Backends::all()).await;
+        let power_preference = adapters
+            .iter()
+            .find(|p| p.get_info().device_type == wgpu::DeviceType::DiscreteGpu)
+            .map(|_| wgpu::PowerPreference::HighPerformance)
+            .unwrap_or(wgpu::PowerPreference::default());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
+                power_preference,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
             })
             .await
             .unwrap();
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: None,
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                    memory_hints: Default::default(),
-                },
-                None,
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: None,
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: Default::default(),
+                experimental_features: Default::default(),
+                trace: wgpu::Trace::default(),
+            })
             .await
             .unwrap();
         let device = Arc::new(device);
@@ -210,7 +308,7 @@ impl Core {
             .formats
             .iter()
             .copied()
-            .find(|f| f.is_srgb())
+            .find(|f| f.is_srgb() && *f == CAPTURE_FORMAT)
             .unwrap_or(surface_caps.formats[0]);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -238,13 +336,26 @@ impl Core {
         &self.window
     }
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        println!("Core resize called with size: {:?}", new_size);
+        debug!("Core resize: {new_size:?}");
         if new_size.width > 0 && new_size.height > 0 {
             self.size = new_size;
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
-            println!("Surface reconfigured");
+            debug!("Surface reconfigured");
         }
+    }
+
+    /// Submit the current encoder and create a new one.
+    ///
+    /// Useful for multi-pass simulations where you need buffer updates to take effect
+    /// before the next dispatch. wgpu batches all write_buffer calls before dispatches
+    /// in the same submit, so this forces the GPU to see your changes.
+    pub fn flush_encoder(&self, encoder: wgpu::CommandEncoder) -> wgpu::CommandEncoder {
+        self.queue.submit(Some(encoder.finish()));
+        self.device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Continued Encoder"),
+            })
     }
 }

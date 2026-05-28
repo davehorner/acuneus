@@ -1,20 +1,32 @@
-use std::time::Instant;
-use egui_wgpu::ScreenDescriptor;
-use egui::ViewportId;
+use crate::compute::ComputeShader;
 #[cfg(feature = "media")]
 use crate::gst::video::VideoTextureManager;
-use std::path::Path;
-use log::{info, error};
+#[cfg(feature = "media")]
+use crate::gst::webcam::WebcamTextureManager;
+use crate::load_hdri_texture;
+use crate::mouse::MouseTracker;
+use crate::mouse::MouseUniform;
+use crate::spectrum::SpectrumAnalyzer;
+use crate::HdriMetadata;
+use crate::{
+    fps, ControlsRequest, Core, ExportManager, KeyInputHandler, Renderer, ResolutionUniform,
+    ShaderControls, TextureManager, UniformBinding, UniformProvider,
+};
+use egui::ViewportId;
+use egui_wgpu::ScreenDescriptor;
 #[cfg(feature = "media")]
 use log::warn;
-use crate::spectrum::SpectrumAnalyzer;
-use crate::compute::ComputeShader;
-use crate::{Core,fps, Renderer, TextureManager, UniformProvider, UniformBinding,KeyInputHandler,ExportManager,ShaderControls,ControlsRequest,ResolutionUniform};
-use crate::mouse::MouseUniform;
-use crate::mouse::MouseTracker;
+use log::{error, info};
+use std::path::Path;
+use std::time::Instant;
 use winit::event::WindowEvent;
-use crate::HdriMetadata;
-use crate::load_hdri_texture;
+
+pub struct FrameContext {
+    pub output: wgpu::SurfaceTexture,
+    pub view: wgpu::TextureView,
+    pub encoder: wgpu::CommandEncoder,
+}
+
 #[cfg(target_os = "macos")]
 pub const CAPTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 #[cfg(not(target_os = "macos"))]
@@ -36,6 +48,10 @@ pub struct RenderKit {
     pub video_texture_manager: Option<VideoTextureManager>,
     #[cfg(feature = "media")]
     pub using_video_texture: bool,
+    #[cfg(feature = "media")]
+    pub webcam_texture_manager: Option<WebcamTextureManager>,
+    #[cfg(feature = "media")]
+    pub using_webcam_texture: bool,
     pub texture_manager: Option<TextureManager>,
     pub egui_renderer: egui_wgpu::Renderer,
     pub egui_state: egui_winit::State,
@@ -48,6 +64,10 @@ pub struct RenderKit {
     pub export_manager: ExportManager,
     pub controls: ShaderControls,
     pub spectrum_analyzer: SpectrumAnalyzer,
+    #[cfg(feature = "media")]
+    pub offline_audio_analysis: Option<crate::gst::offline_audio::OfflineAudioAnalysis>,
+    #[cfg(feature = "media")]
+    pub export_audio_active: bool,
     pub compute_shader: Option<ComputeShader>,
     pub fps_tracker: fps::FpsTracker,
     pub mouse_tracker: MouseTracker,
@@ -56,46 +76,66 @@ pub struct RenderKit {
     pub using_hdri_texture: bool,
     pub hdri_metadata: Option<HdriMetadata>,
     pub hdri_file_data: Option<Vec<u8>>,
+    media_error: Option<String>,
+    initial_logical_height: f32,
 }
 
 impl RenderKit {
-    pub fn new(
+    const VERTEX_SHADER: &'static str = include_str!("../shaders/vertex.wgsl");
+    const BLIT_SHADER: &'static str = include_str!("../shaders/blit.wgsl");
+
+    /// Creates a bind group layout with texture (binding 0) and sampler (binding 1) for displaying compute shader output
+    pub fn create_standard_texture_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        TextureManager::create_display_layout(device)
+    }
+
+    /// Create RenderKit with the standard texture layout (texture + sampler).
+    pub fn new(core: &Core) -> Self {
+        let layout = Self::create_standard_texture_layout(&core.device);
+        Self::new_with_layout(core, &layout, None)
+    }
+
+    /// Create RenderKit with a custom bind group layout and optional fragment entry point.
+    pub fn new_with_layout(
         core: &Core,
-        vs_source: &str,
-        fs_source: &str,
-        bind_group_layouts: &[&wgpu::BindGroupLayout],
+        layout: &wgpu::BindGroupLayout,
         fragment_entry: Option<&str>,
     ) -> Self {
-        let time_bind_group_layout = core.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-            label: Some("time_bind_group_layout"),
-        });
-        let resolution_bind_group_layout = core.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-            label: Some("resolution_bind_group_layout"),
-        });
+        let bind_group_layouts: &[Option<&wgpu::BindGroupLayout>] = &[Some(layout)];
+        let time_bind_group_layout =
+            core.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }],
+                    label: Some("time_bind_group_layout"),
+                });
+        let resolution_bind_group_layout =
+            core.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }],
+                    label: Some("resolution_bind_group_layout"),
+                });
         let time_uniform = UniformBinding::new(
             &core.device,
             "Time Uniform",
-            TimeUniform { 
+            TimeUniform {
                 time: 0.0,
                 frame: 0,
             },
@@ -110,54 +150,42 @@ impl RenderKit {
                 _padding: [0.0, 0.0],
                 audio_data: [[0.0; 4]; 32],
                 bpm: 0.0,
-                _bpm_padding: [0.0, 0.0, 0.0],
+                bass_energy: 0.0,
+                mid_energy: 0.0,
+                high_energy: 0.0,
+                total_energy: 0.0,
+                _energy_padding: [0.0, 0.0, 0.0],
             },
             &resolution_bind_group_layout,
             0,
         );
-        let vs_shader = core.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Vertex Shader"),
-            source: wgpu::ShaderSource::Wgsl(vs_source.into()),
-        });
-        let fs_shader = core.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Fragment Shader"),
-            source: wgpu::ShaderSource::Wgsl(fs_source.into()),
-        });
-        let texture_bind_group_layout = core.device.create_bind_group_layout(
-            &wgpu::BindGroupLayoutDescriptor {
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            multisampled: false,
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-                label: Some("texture_bind_group_layout"),
-            },
-        );
-        let pipeline_layout = core.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Render Pipeline Layout"),
-            bind_group_layouts,
-            push_constant_ranges: &[],
-        });
+        let vs_shader = core
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Vertex Shader"),
+                source: wgpu::ShaderSource::Wgsl(Self::VERTEX_SHADER.into()),
+            });
+        let fs_shader = core
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Fragment Shader"),
+                source: wgpu::ShaderSource::Wgsl(Self::BLIT_SHADER.into()),
+            });
+        let texture_bind_group_layout = TextureManager::create_display_layout(&core.device);
+        let pipeline_layout = core
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts,
+                immediate_size: 0,
+            });
         let renderer = Renderer::new(
             &core.device,
             &vs_shader,
             &fs_shader,
             core.config.format,
             &pipeline_layout,
-            fragment_entry, 
+            fragment_entry,
         );
         let context = egui::Context::default();
         let egui_state = egui_winit::State::new(
@@ -171,13 +199,12 @@ impl RenderKit {
         let egui_renderer = egui_wgpu::Renderer::new(
             &core.device,
             core.config.format,
-            None,
-            1,
-            false,
+            egui_wgpu::RendererOptions::default(),
         );
 
         //  default texture manager
-        let texture_manager = Self::create_default_texture_manager(core, &texture_bind_group_layout);
+        let texture_manager =
+            Self::create_default_texture_manager(core, &texture_bind_group_layout);
         let fps_tracker = fps::FpsTracker::new();
         let mouse_tracker = MouseTracker::new();
 
@@ -187,6 +214,10 @@ impl RenderKit {
             video_texture_manager: None,
             #[cfg(feature = "media")]
             using_video_texture: false,
+            #[cfg(feature = "media")]
+            webcam_texture_manager: None,
+            #[cfg(feature = "media")]
+            using_webcam_texture: false,
             texture_manager: Some(texture_manager),
             egui_renderer,
             egui_state,
@@ -199,6 +230,10 @@ impl RenderKit {
             export_manager: ExportManager::new(),
             controls: ShaderControls::new(),
             spectrum_analyzer: SpectrumAnalyzer::new(),
+            #[cfg(feature = "media")]
+            offline_audio_analysis: None,
+            #[cfg(feature = "media")]
+            export_audio_active: false,
             compute_shader: None,
             fps_tracker,
             mouse_tracker,
@@ -207,6 +242,8 @@ impl RenderKit {
             using_hdri_texture: false,
             hdri_metadata: None,
             hdri_file_data: None,
+            media_error: None,
+            initial_logical_height: core.size.height as f32 / core.window().scale_factor() as f32,
         }
     }
 
@@ -214,11 +251,15 @@ impl RenderKit {
         self.time_uniform.data.time = self.start_time.elapsed().as_secs_f32();
         self.time_uniform.update(queue);
     }
-    pub fn update_resolution(&mut self, queue: &wgpu::Queue, new_size: winit::dpi::PhysicalSize<u32>) {
+    pub fn update_resolution(
+        &mut self,
+        queue: &wgpu::Queue,
+        new_size: winit::dpi::PhysicalSize<u32>,
+    ) {
         self.resolution_uniform.data.dimensions = [new_size.width as f32, new_size.height as f32];
         self.resolution_uniform.update(queue);
     }
-    fn create_default_texture_manager(
+    pub fn create_default_texture_manager(
         core: &Core,
         texture_bind_group_layout: &wgpu::BindGroupLayout,
     ) -> TextureManager {
@@ -238,7 +279,9 @@ impl RenderKit {
         });
 
         let default_view = default_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let sampler = core.device.create_sampler(&wgpu::SamplerDescriptor::default());
+        let sampler = core
+            .device
+            .create_sampler(&wgpu::SamplerDescriptor::default());
 
         let bind_group = core.device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: texture_bind_group_layout,
@@ -263,12 +306,66 @@ impl RenderKit {
         }
     }
 
-    pub fn render_ui<F>(&mut self, core: &Core, mut ui_builder: F) -> egui::FullOutput 
+    pub fn render_ui<F>(&mut self, core: &Core, mut ui_builder: F) -> egui::FullOutput
     where
         F: FnMut(&egui::Context),
     {
+        // Auto-scale egui proportionally to window size
+        let scale_factor = core.window().scale_factor() as f32;
+        let logical_height = core.size.height as f32 / scale_factor;
+        let zoom = (logical_height / self.initial_logical_height).clamp(0.5, 3.0);
+        self.context.set_zoom_factor(zoom);
+
         let raw_input = self.egui_state.take_egui_input(core.window());
-        self.context.run(raw_input, |ctx| ui_builder(ctx))
+        let context = self.context.clone();
+        context.run_ui(raw_input, |ctx| {
+            ui_builder(ctx);
+            self.render_media_error_dialog(ctx);
+        })
+    }
+
+    fn set_media_error(&mut self, path: &Path, error: &anyhow::Error) {
+        self.media_error = Some(format!(
+            "Failed to open media:\n{}\n\n{}",
+            path.display(),
+            error
+        ));
+    }
+
+    fn render_media_error_dialog(&mut self, ctx: &egui::Context) {
+        let Some(error_text) = self.media_error.clone() else {
+            return;
+        };
+
+        let mut should_close = false;
+        let mut error_display = error_text.clone();
+        egui::Window::new("Open Failed")
+            .collapsible(false)
+            .resizable(true)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                ui.label("The selected file could not be opened.");
+                ui.separator();
+                ui.add(
+                    egui::TextEdit::multiline(&mut error_display)
+                        .desired_rows(5)
+                        .desired_width(f32::INFINITY)
+                        .interactive(false),
+                );
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Copy Error").clicked() {
+                        ui.ctx().copy_text(error_text.clone());
+                    }
+                    if ui.button("Close").clicked() {
+                        should_close = true;
+                    }
+                });
+            });
+
+        if should_close {
+            self.media_error = None;
+        }
     }
 
     pub fn handle_render_output(
@@ -280,21 +377,16 @@ impl RenderKit {
     ) {
         let screen_descriptor = ScreenDescriptor {
             size_in_pixels: [core.config.width, core.config.height],
-            pixels_per_point: core.window().scale_factor() as f32,
+            pixels_per_point: self.context.pixels_per_point(),
         };
 
-        let clipped_primitives = self.context.tessellate(
-            full_output.shapes,
-            screen_descriptor.pixels_per_point,
-        );
+        let clipped_primitives = self
+            .context
+            .tessellate(full_output.shapes, screen_descriptor.pixels_per_point);
         // Update egui textures
         for (id, image_delta) in &full_output.textures_delta.set {
-            self.egui_renderer.update_texture(
-                &core.device,
-                &core.queue,
-                *id,
-                image_delta,
-            );
+            self.egui_renderer
+                .update_texture(&core.device, &core.queue, *id, image_delta);
         }
 
         self.egui_renderer.update_buffers(
@@ -306,64 +398,123 @@ impl RenderKit {
         );
 
         {
-            let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Egui Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-            let mut render_pass = render_pass.forget_lifetime();
-            self.egui_renderer.render(
-                &mut render_pass,
-                &clipped_primitives,
-                &screen_descriptor,
+            let render_pass = crate::Renderer::begin_render_pass(
+                encoder,
+                view,
+                wgpu::LoadOp::Load,
+                Some("Egui Render Pass"),
             );
+            let mut render_pass = render_pass.into_inner().forget_lifetime();
+            self.egui_renderer
+                .render(&mut render_pass, &clipped_primitives, &screen_descriptor);
         }
         // Cleanup egui textures
         for id in &full_output.textures_delta.free {
             self.egui_renderer.free_texture(id);
         }
     }
+    pub fn begin_frame(&self, core: &Core) -> Result<FrameContext, crate::SurfaceError> {
+        let output = match core.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                return Err(crate::SurfaceError::SkipFrame);
+            }
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                return Err(crate::SurfaceError::Outdated);
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
+                return Err(crate::SurfaceError::Lost);
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                return Err(crate::SurfaceError::Lost);
+            }
+        };
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let encoder = core
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Render Encoder"),
+            });
+        Ok(FrameContext {
+            output,
+            view,
+            encoder,
+        })
+    }
+
+    pub fn end_frame(&mut self, core: &Core, frame: FrameContext, full_output: egui::FullOutput) {
+        let mut encoder = frame.encoder;
+        self.handle_render_output(core, &frame.view, full_output, &mut encoder);
+        core.queue.submit(std::iter::once(encoder.finish()));
+        frame.output.present();
+        self.fps_tracker.update();
+    }
+
+    pub fn apply_default_style(ctx: &egui::Context) {
+        ctx.global_style_mut(|style| {
+            style.visuals.window_fill = egui::Color32::from_rgba_premultiplied(0, 0, 0, 180);
+            style
+                .text_styles
+                .get_mut(&egui::TextStyle::Body)
+                .unwrap()
+                .size = 11.0;
+            style
+                .text_styles
+                .get_mut(&egui::TextStyle::Button)
+                .unwrap()
+                .size = 10.0;
+        });
+    }
+
     pub fn load_media<P: AsRef<Path>>(&mut self, core: &Core, path: P) -> anyhow::Result<()> {
-        let path_ref = path.as_ref();
-        let extension = path_ref.extension()
+        let path_buf = path.as_ref().to_path_buf();
+        let result = self.load_media_inner(core, &path_buf);
+        match &result {
+            Ok(()) => self.media_error = None,
+            Err(error) => self.set_media_error(&path_buf, error),
+        }
+        result
+    }
+
+    fn load_media_inner(&mut self, core: &Core, path_ref: &Path) -> anyhow::Result<()> {
+        let extension = path_ref
+            .extension()
             .and_then(|ext| ext.to_str())
             .map(|ext| ext.to_lowercase());
-        
+
         match extension {
             // Image formats
-            Some(ext) if ["png", "jpg", "jpeg", "bmp", "gif", "tiff", "webp"].contains(&ext.as_str()) => {
-                info!("Loading image: {:?}", path_ref);
-                if let Ok(img) = image::open(path_ref) {
-                    let rgba_image = img.into_rgba8();
-                    let new_texture_manager = TextureManager::new(
-                        &core.device,
-                        &core.queue,
-                        &rgba_image,
-                        &self.texture_bind_group_layout,
-                    );
-                    self.texture_manager = Some(new_texture_manager);
-                    #[cfg(feature = "media")]
-                    {
-                        self.using_video_texture = false;
-                        self.video_texture_manager = None;
+            Some(ext)
+                if ["png", "jpg", "jpeg", "bmp", "gif", "tiff", "webp"].contains(&ext.as_str()) =>
+            {
+                info!("Loading image: {path_ref:?}");
+                match image::open(path_ref) {
+                    Ok(img) => {
+                        let rgba_image = img.into_rgba8();
+                        let new_texture_manager = TextureManager::new(
+                            &core.device,
+                            &core.queue,
+                            &rgba_image,
+                            &self.texture_bind_group_layout,
+                        );
+                        self.texture_manager = Some(new_texture_manager);
+                        #[cfg(feature = "media")]
+                        {
+                            self.using_video_texture = false;
+                            self.video_texture_manager = None;
+                            self.using_webcam_texture = false;
+                            self.webcam_texture_manager = None;
+                        }
+                        Ok(())
                     }
-                    Ok(())
-                } else {
-                    Err(anyhow::anyhow!("Failed to open image"))
+                    Err(error) => Err(anyhow::anyhow!("Failed to open image: {}", error)),
                 }
-            },
-            Some(ext) if ["hdr","exr"].contains(&ext.as_str()) => {
-                info!("Loading HDRI: {:?}", path_ref);
+            }
+            Some(ext) if ["hdr", "exr"].contains(&ext.as_str()) => {
+                info!("Loading HDRI: {path_ref:?}");
                 let file_data = std::fs::read(path_ref)?;
                 self.hdri_file_data = Some(file_data.clone());
                 let default_exposure = 1.0;
@@ -372,7 +523,7 @@ impl RenderKit {
                     &core.queue,
                     &file_data,
                     &self.texture_bind_group_layout,
-                    default_exposure
+                    default_exposure,
                 ) {
                     Ok((texture_manager, metadata)) => {
                         self.texture_manager = Some(texture_manager);
@@ -380,20 +531,25 @@ impl RenderKit {
                         {
                             self.using_video_texture = false;
                             self.video_texture_manager = None;
+                            self.using_webcam_texture = false;
+                            self.webcam_texture_manager = None;
                         }
                         self.using_hdri_texture = true;
                         self.hdri_metadata = Some(metadata);
                         Ok(())
-                    },
+                    }
                     Err(e) => {
-                        error!("Failed to load HDRI: {}", e);
+                        error!("Failed to load HDRI: {e}");
                         Err(anyhow::anyhow!("Failed to load HDRI: {}", e))
                     }
                 }
-            },
+            }
             #[cfg(feature = "media")]
-            Some(ext) if ["mp4", "avi", "mkv", "mov", "webm"].contains(&ext.as_str()) => {
-                info!("Loading video: {:?}", path_ref);
+            Some(ext)
+                if ["mp4", "avi", "mkv", "mov", "webm", "mp3", "wav", "ogg"]
+                    .contains(&ext.as_str()) =>
+            {
+                info!("Loading video: {path_ref:?}");
                 match VideoTextureManager::new(
                     &core.device,
                     &core.queue,
@@ -403,22 +559,22 @@ impl RenderKit {
                     Ok(video_manager) => {
                         self.video_texture_manager = Some(video_manager);
                         self.using_video_texture = true;
+                        self.using_webcam_texture = false;
+                        self.webcam_texture_manager = None;
                         if let Err(e) = self.play_video() {
-                            warn!("Failed to play video: {}", e);
+                            warn!("Failed to play video: {e}");
                         }
                         self.set_video_loop(true);
-                        
+
                         Ok(())
-                    },
+                    }
                     Err(e) => {
-                        error!("Failed to load video: {}", e);
+                        error!("Failed to load video: {e}");
                         Err(e)
                     }
                 }
-            },
-            _ => {
-                Err(anyhow::anyhow!("Unsupported media format: {:?}", path_ref))
             }
+            _ => Err(anyhow::anyhow!("Unsupported media format: {:?}", path_ref)),
         }
     }
     #[cfg(feature = "media")]
@@ -428,7 +584,7 @@ impl RenderKit {
                 if let Ok(updated) = video_manager.update_texture(
                     &core.device,
                     queue,
-                    &self.texture_bind_group_layout
+                    &self.texture_bind_group_layout,
                 ) {
                     return updated;
                 }
@@ -458,23 +614,65 @@ impl RenderKit {
         }
         Ok(())
     }
-    
+
     #[cfg(feature = "media")]
     pub fn set_video_loop(&mut self, should_loop: bool) {
         if let Some(video_manager) = &mut self.video_texture_manager {
             video_manager.set_loop(should_loop);
         }
     }
+
+    #[cfg(feature = "media")]
+    pub fn start_webcam(&mut self, core: &Core, device_index: Option<u32>) -> anyhow::Result<()> {
+        info!("Starting webcam");
+        let webcam_manager = WebcamTextureManager::new(
+            &core.device,
+            &core.queue,
+            &self.texture_bind_group_layout,
+            device_index,
+        )?;
+
+        let mut manager = webcam_manager;
+        manager.start()?;
+
+        self.webcam_texture_manager = Some(manager);
+        self.using_webcam_texture = true;
+        self.using_video_texture = false;
+        self.video_texture_manager = None;
+        self.using_hdri_texture = false;
+
+        Ok(())
+    }
+
+    #[cfg(feature = "media")]
+    pub fn stop_webcam(&mut self) -> anyhow::Result<()> {
+        info!("Stopping webcam");
+        if let Some(webcam_manager) = &mut self.webcam_texture_manager {
+            webcam_manager.stop()?;
+        }
+        self.using_webcam_texture = false;
+        self.webcam_texture_manager = None;
+        Ok(())
+    }
+
+    #[cfg(feature = "media")]
+    pub fn update_webcam_texture(&mut self, core: &Core, queue: &wgpu::Queue) -> bool {
+        if self.using_webcam_texture {
+            if let Some(webcam_manager) = &mut self.webcam_texture_manager {
+                if let Ok(updated) = webcam_manager.update_texture(
+                    &core.device,
+                    queue,
+                    &self.texture_bind_group_layout,
+                ) {
+                    return updated;
+                }
+            }
+        }
+        false
+    }
     pub fn load_image(&mut self, core: &Core, path: std::path::PathBuf) {
-        if let Ok(img) = image::open(path) {
-            let rgba_image = img.into_rgba8();
-            let new_texture_manager = TextureManager::new(
-                &core.device,
-                &core.queue,
-                &rgba_image,
-                &self.texture_bind_group_layout,
-            );
-            self.texture_manager = Some(new_texture_manager);
+        if let Err(error) = self.load_media(core, &path) {
+            error!("Failed to load image {path:?}: {error:?}");
         }
     }
     pub fn create_capture_texture(
@@ -510,6 +708,67 @@ impl RenderKit {
         });
         (capture_texture, output_buffer)
     }
+    pub fn default_handle_input(&mut self, core: &Core, event: &WindowEvent) -> bool {
+        if self.forward_to_egui(core, event) {
+            return true;
+        }
+        if let WindowEvent::DroppedFile(path) = event {
+            if let Err(e) = self.load_media(core, path) {
+                error!("Failed to load dropped file {path:?}: {e:?}");
+            }
+            return true;
+        }
+        if let WindowEvent::KeyboardInput { event, .. } = event {
+            return self.key_handler.handle_keyboard_input(core.window(), event);
+        }
+        false
+    }
+
+    /// Forwards `event` to egui and returns `true` if egui actually owns it.
+    ///
+    /// For pointer events, ignores egui's `consumed` when the cursor is over
+    /// the implicit background layer that `Context::run_ui` allocates in
+    /// egui 0.34 — otherwise every click on empty space would be swallowed.
+    pub fn forward_to_egui(&mut self, core: &Core, event: &WindowEvent) -> bool {
+        let response = self.egui_state.on_window_event(core.window(), event);
+        if !response.consumed {
+            return false;
+        }
+        match event {
+            WindowEvent::MouseInput { .. }
+            | WindowEvent::MouseWheel { .. }
+            | WindowEvent::CursorMoved { .. } => self.pointer_over_egui(),
+            _ => true,
+        }
+    }
+
+    /// True when the cursor is over a foreground egui layer (Window, Panel,
+    /// menu, tooltip), not the background layer that `run_ui` allocates.
+    pub fn pointer_over_egui(&self) -> bool {
+        let Some(pos) = self.context.input(|i| i.pointer.interact_pos()) else {
+            return false;
+        };
+        match self.context.layer_id_at(pos) {
+            Some(layer) => layer.order != egui::Order::Background,
+            None => false,
+        }
+    }
+
+    pub fn default_resize(&mut self, core: &Core, compute_shader: &mut ComputeShader) {
+        self.update_resolution(&core.queue, core.size);
+        compute_shader.resize(core, core.size.width, core.size.height);
+    }
+
+    pub fn apply_media_requests(&mut self, core: &Core, controls_request: &ControlsRequest) {
+        self.apply_control_request(controls_request.clone());
+        #[cfg(feature = "media")]
+        {
+            self.handle_video_requests(core, controls_request);
+            self.handle_webcam_requests(core, controls_request);
+        }
+        self.handle_hdri_requests(core, controls_request);
+    }
+
     pub fn apply_control_request(&mut self, request: ControlsRequest) {
         if request.should_reset {
             self.start_time = Instant::now();
@@ -518,49 +777,126 @@ impl RenderKit {
     }
     #[cfg(feature = "media")]
     pub fn update_audio_spectrum(&mut self, queue: &wgpu::Queue) {
+        // During export, audio is driven by handle_export per-frame from the
+        // offline analysis so the spectrum lines up with the time of the frame
+        // being captured. Skip the live path to avoid clobbering that data.
+        if self.export_audio_active {
+            return;
+        }
         self.spectrum_analyzer.update_spectrum(
             queue,
             &mut self.resolution_uniform,
             &self.video_texture_manager,
             self.using_video_texture,
+            &self.webcam_texture_manager,
+            self.using_webcam_texture,
         );
+    }
+
+    /// Feed a single offline analyzed audio frame (looked up at media time
+    /// `time_secs`) into the spectrum analyzer's processing pipeline. Used by
+    /// the export path so each rendered frame sees audio data sampled at its
+    /// own timeline position rather than wherever live playback happens to be.
+    #[cfg(feature = "media")]
+    pub fn apply_offline_audio_at(&mut self, queue: &wgpu::Queue, time_secs: f64) {
+        if let Some(analysis) = &self.offline_audio_analysis {
+            if let Some(sample) = analysis.sample(time_secs) {
+                self.spectrum_analyzer.apply_offline_sample(
+                    queue,
+                    &mut self.resolution_uniform,
+                    &sample,
+                );
+            }
+        }
+    }
+
+    /// Run the offline audio analyzer for the currently loaded media file so
+    /// the export path can sample frame-time-aligned spectrum/level/BPM data.
+    /// Called once at the start of export. Returns true if analysis succeeded.
+    #[cfg(feature = "media")]
+    pub fn begin_export_audio(&mut self) -> bool {
+        let path_opt = self
+            .video_texture_manager
+            .as_ref()
+            .filter(|vm| vm.has_audio())
+            .map(|vm| vm.path().to_owned());
+        let media_path = match path_opt {
+            Some(p) => p,
+            None => return false,
+        };
+
+        // Pause live playback so its bus traffic doesn't compete with the
+        // offline pipeline and so the user doesn't hear audio drift while
+        // export runs.
+        let _ = self.pause_video();
+        self.spectrum_analyzer.reset_smoothing();
+
+        info!("Pre-analyzing audio for export: {}", media_path);
+        match crate::gst::offline_audio::OfflineAudioAnalysis::analyze(&media_path, 128, -60, 50) {
+            Ok(analysis) => {
+                self.offline_audio_analysis = Some(analysis);
+                self.export_audio_active = true;
+                true
+            }
+            Err(e) => {
+                error!("Offline audio analysis failed: {e}");
+                self.offline_audio_analysis = None;
+                self.export_audio_active = false;
+                let _ = self.play_video();
+                false
+            }
+        }
+    }
+
+    /// Drop any offline analysis state and resume live playback. Called when
+    /// export finishes.
+    #[cfg(feature = "media")]
+    pub fn end_export_audio(&mut self) {
+        if self.offline_audio_analysis.is_some() {
+            self.offline_audio_analysis = None;
+        }
+        if self.export_audio_active {
+            self.export_audio_active = false;
+            self.spectrum_analyzer.reset_smoothing();
+            let _ = self.play_video();
+        }
     }
     #[cfg(feature = "media")]
     pub fn handle_video_requests(&mut self, core: &Core, request: &ControlsRequest) {
         if let Some(path) = &request.load_media_path {
             if let Err(e) = self.load_media(core, path) {
-                error!("Failed to load media: {}", e);
+                error!("Failed to load media: {e}");
             }
         }
-        
+
         if request.play_video {
             let _ = self.play_video();
         }
-        
+
         if request.pause_video {
             let _ = self.pause_video();
         }
-        
+
         if request.restart_video {
             let _ = self.seek_video(0.0);
             let _ = self.play_video();
         }
-        
+
         if let Some(position) = request.seek_position {
             let _ = self.seek_video(position);
         }
-        
+
         if let Some(should_loop) = request.set_loop {
             self.set_video_loop(should_loop);
         }
-        
+
         // Handle audio control requests
         if let Some(volume) = request.set_volume {
             if let Some(vm) = &mut self.video_texture_manager {
                 let _ = vm.set_volume(volume);
             }
         }
-        
+
         if let Some(muted) = request.mute_audio {
             if let Some(vm) = &mut self.video_texture_manager {
                 let _ = vm.set_mute(muted);
@@ -572,6 +908,21 @@ impl RenderKit {
             }
         }
     }
+
+    #[cfg(feature = "media")]
+    pub fn handle_webcam_requests(&mut self, core: &Core, request: &ControlsRequest) {
+        if request.start_webcam {
+            if let Err(e) = self.start_webcam(core, request.webcam_device_index) {
+                error!("Failed to start webcam: {e}");
+            }
+        }
+
+        if request.stop_webcam {
+            if let Err(e) = self.stop_webcam() {
+                error!("Failed to stop webcam: {e}");
+            }
+        }
+    }
     pub fn handle_hdri_requests(&mut self, core: &Core, request: &ControlsRequest) -> bool {
         if !self.using_hdri_texture {
             return false;
@@ -579,7 +930,8 @@ impl RenderKit {
         let mut updated = false;
         let mut new_exposure = None;
         let mut new_gamma = None;
-        if let (Some(exposure), Some(hdri_meta)) = (request.hdri_exposure, &mut self.hdri_metadata) {
+        if let (Some(exposure), Some(hdri_meta)) = (request.hdri_exposure, &mut self.hdri_metadata)
+        {
             if (exposure - hdri_meta.exposure).abs() > 0.001 {
                 hdri_meta.exposure = exposure;
                 new_exposure = Some(exposure);
@@ -594,10 +946,11 @@ impl RenderKit {
             }
         }
         if updated {
-            if let (Some(hdri_data), Some(texture_manager)) = (&self.hdri_file_data, &mut self.texture_manager) {
-                let exposure = new_exposure.unwrap_or_else(|| {
-                    self.hdri_metadata.map(|meta| meta.exposure).unwrap_or(1.0)
-                });
+            if let (Some(hdri_data), Some(texture_manager)) =
+                (&self.hdri_file_data, &mut self.texture_manager)
+            {
+                let exposure = new_exposure
+                    .unwrap_or_else(|| self.hdri_metadata.map(|meta| meta.exposure).unwrap_or(1.0));
                 if let Err(e) = crate::update_hdri_exposure(
                     &core.device,
                     &core.queue,
@@ -605,9 +958,9 @@ impl RenderKit {
                     &self.texture_bind_group_layout,
                     texture_manager,
                     exposure,
-                    new_gamma
+                    new_gamma,
                 ) {
-                    error!("Failed to update HDRI parameters: {}", e);
+                    error!("Failed to update HDRI parameters: {e}");
                 }
             }
         }
@@ -616,7 +969,7 @@ impl RenderKit {
 
     pub fn get_hdri_info(&self) -> Option<HdriMetadata> {
         if self.using_hdri_texture {
-            self.hdri_metadata.clone()
+            self.hdri_metadata
         } else {
             None
         }
@@ -625,57 +978,62 @@ impl RenderKit {
         &mut self,
         core: &Core,
         shader_source: &str,
-        entry_point: &str,
-        workgroup_size: [u32; 3],
-        workgroup_count: Option<[u32; 3]>,
-        dispatch_once: bool,
+        _entry_point: &str,
+        _workgroup_size: [u32; 3],
+        _workgroup_count: Option<[u32; 3]>,
+        _dispatch_once: bool,
     ) {
-        self.compute_shader = Some(ComputeShader::new(
-            core,
-            shader_source,
-            entry_point,
-            workgroup_size,
-            workgroup_count,
-            dispatch_once,
-        ));
+        // WIP untill I complete everything in compute folder
+        self.compute_shader = Some(ComputeShader::new(core, shader_source));
     }
-    
-    pub fn enable_compute_hot_reload(&mut self, core: &Core, shader_path: &Path) -> Result<(), notify::Error> {
+
+    pub fn enable_compute_hot_reload(
+        &mut self,
+        core: &Core,
+        shader_path: &Path,
+    ) -> Result<(), notify::Error> {
         if let Some(compute_shader) = &mut self.compute_shader {
             let shader_source = std::fs::read_to_string(shader_path)?;
-            let shader_module = core.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("Compute Shader Hot Reload"),
-                source: wgpu::ShaderSource::Wgsl(shader_source.into()),
-            });
+            let shader_module = core
+                .device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("Compute Shader Hot Reload"),
+                    source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+                });
             compute_shader.enable_hot_reload(
                 core.device.clone(),
                 shader_path.to_path_buf(),
                 shader_module,
             )?;
-            
-            println!("Compute shader hot reload enabled for: {}", shader_path.display());
+
+            info!(
+                "Compute shader hot reload enabled for: {}",
+                shader_path.display()
+            );
             Ok(())
         } else {
             Err(notify::Error::generic("No compute shader initialized"))
         }
     }
-    
+
     pub fn dispatch_compute_shader(&mut self, encoder: &mut wgpu::CommandEncoder, core: &Core) {
         if let Some(compute) = &mut self.compute_shader {
             compute.dispatch(encoder, core);
         }
     }
-    
+
     pub fn get_compute_output_texture(&self) -> Option<&TextureManager> {
-        self.compute_shader.as_ref().map(|compute| compute.get_output_texture())
+        self.compute_shader
+            .as_ref()
+            .map(|compute| compute.get_output_texture())
     }
-    
+
     pub fn resize_compute_shader(&mut self, core: &Core) {
         if let Some(compute) = &mut self.compute_shader {
             compute.resize(core, core.size.width, core.size.height);
         }
     }
-    
+
     pub fn update_compute_shader_time(&mut self, elapsed: f32, delta: f32, queue: &wgpu::Queue) {
         if let Some(compute) = &mut self.compute_shader {
             compute.set_time(elapsed, delta, queue);
@@ -684,10 +1042,21 @@ impl RenderKit {
 
     /// Get video information if a video texture is loaded
     #[cfg(feature = "media")]
-    pub fn get_video_info(&self) -> Option<(Option<f32>, f32, (u32, u32), Option<f32>, bool, bool, f64, bool)> {
+    pub fn get_video_info(
+        &self,
+    ) -> Option<(
+        Option<f32>,
+        f32,
+        (u32, u32),
+        Option<f32>,
+        bool,
+        bool,
+        f64,
+        bool,
+    )> {
         if self.using_video_texture {
-            if let Some(vm) = &self.video_texture_manager {
-                Some((
+            self.video_texture_manager.as_ref().map(|vm| {
+                (
                     vm.duration().map(|d| d.seconds() as f32),
                     vm.position().seconds() as f32,
                     vm.dimensions(),
@@ -695,31 +1064,42 @@ impl RenderKit {
                     vm.is_looping(),
                     vm.has_audio(),
                     vm.volume(),
-                    vm.is_muted()
-                ))
-            } else {
-                None
-            }
+                    vm.is_muted(),
+                )
+            })
+        } else {
+            None
+        }
+    }
+
+    #[cfg(feature = "media")]
+    pub fn get_webcam_info(&self) -> Option<(u32, u32)> {
+        if self.using_webcam_texture {
+            self.webcam_texture_manager
+                .as_ref()
+                .map(|wm| wm.dimensions())
         } else {
             None
         }
     }
     pub fn setup_mouse_uniform(&mut self, core: &Core) {
         if self.mouse_uniform.is_none() {
-            let mouse_bind_group_layout = core.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-                label: Some("mouse_bind_group_layout"),
-            });
-            
+            let mouse_bind_group_layout =
+                core.device
+                    .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        entries: &[wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        }],
+                        label: Some("mouse_bind_group_layout"),
+                    });
+
             let mouse_uniform = UniformBinding::new(
                 &core.device,
                 "Mouse Uniform",
@@ -727,25 +1107,61 @@ impl RenderKit {
                 &mouse_bind_group_layout,
                 0,
             );
-            
+
             self.mouse_bind_group_layout = Some(mouse_bind_group_layout);
             self.mouse_uniform = Some(mouse_uniform);
         }
     }
-    
+
     pub fn update_mouse_uniform(&mut self, queue: &wgpu::Queue) {
         if let Some(mouse_uniform) = &mut self.mouse_uniform {
             mouse_uniform.data = self.mouse_tracker.uniform;
             mouse_uniform.update(queue);
         }
     }
-    
-    pub fn handle_mouse_input(&mut self, core: &Core, event: &WindowEvent, ui_handled: bool) -> bool {
-        let window_size = [
-            core.size.width as f32,
-            core.size.height as f32,
-        ];
-        
-        self.mouse_tracker.handle_mouse_input(event, window_size, ui_handled)
+
+    pub fn handle_mouse_input(
+        &mut self,
+        core: &Core,
+        event: &WindowEvent,
+        ui_handled: bool,
+    ) -> bool {
+        let window_size = [core.size.width as f32, core.size.height as f32];
+
+        self.mouse_tracker
+            .handle_mouse_input(event, window_size, ui_handled)
+    }
+
+    /// Get current active texture manager (video, webcam, or static image)
+    pub fn get_current_texture_manager(&self) -> Option<&TextureManager> {
+        #[cfg(feature = "media")]
+        {
+            if self.using_video_texture {
+                return self
+                    .video_texture_manager
+                    .as_ref()
+                    .map(|vm| vm.texture_manager());
+            } else if self.using_webcam_texture {
+                return self
+                    .webcam_texture_manager
+                    .as_ref()
+                    .map(|wm| wm.texture_manager());
+            }
+        }
+        self.texture_manager.as_ref()
+    }
+
+    /// Update current active texture and return whether an external texture update is needed
+    pub fn update_current_texture(&mut self, core: &Core, queue: &wgpu::Queue) -> bool {
+        #[cfg(feature = "media")]
+        {
+            if self.using_video_texture {
+                return self.update_video_texture(core, queue);
+            } else if self.using_webcam_texture {
+                return self.update_webcam_texture(core, queue);
+            }
+        }
+        // Static textures don't need updates
+        false
     }
 }

@@ -1,0 +1,268 @@
+use std::collections::HashMap;
+use wgpu;
+
+#[derive(Debug, Clone)]
+pub enum ResourceType {
+    UniformBuffer {
+        size: u64,
+    },
+    StorageBuffer {
+        size: u64,
+        read_only: bool,
+    },
+    StorageTexture {
+        format: wgpu::TextureFormat,
+        access: wgpu::StorageTextureAccess,
+    },
+    InputTexture,
+    ChannelTexture, // External texture channels (channel0, channel1, etc.)
+    Sampler,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResourceBinding {
+    pub group: u32,
+    pub binding: u32,
+    pub name: String,
+    pub resource_type: ResourceType,
+}
+
+#[derive(Debug, Default)]
+pub struct ResourceLayout {
+    pub bindings: Vec<ResourceBinding>,
+}
+
+impl ResourceLayout {
+    pub fn new() -> Self {
+        Self {
+            bindings: Vec::new(),
+        }
+    }
+
+    pub fn add_resource(&mut self, group: u32, name: &str, resource_type: ResourceType) {
+        let binding = self.next_binding_in_group(group);
+        self.bindings.push(ResourceBinding {
+            group,
+            binding,
+            name: name.to_string(),
+            resource_type,
+        });
+    }
+
+    fn next_binding_in_group(&self, group: u32) -> u32 {
+        self.bindings
+            .iter()
+            .filter(|b| b.group == group)
+            .map(|b| b.binding)
+            .max()
+            .map(|max| max + 1)
+            .unwrap_or(0)
+    }
+
+    pub fn create_bind_group_layouts(
+        &self,
+        device: &wgpu::Device,
+    ) -> HashMap<u32, wgpu::BindGroupLayout> {
+        let mut groups: HashMap<u32, Vec<&ResourceBinding>> = HashMap::new();
+        for binding in &self.bindings {
+            groups.entry(binding.group).or_default().push(binding);
+        }
+
+        // layout for each group
+        groups
+            .into_iter()
+            .map(|(group_idx, bindings)| {
+                let entries: Vec<wgpu::BindGroupLayoutEntry> = bindings
+                    .iter()
+                    .map(|binding| self.create_layout_entry(binding))
+                    .collect();
+
+                let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some(&format!("Dynamic Group {group_idx} Layout")),
+                    entries: &entries,
+                });
+
+                (group_idx, layout)
+            })
+            .collect()
+    }
+
+    fn create_layout_entry(&self, binding: &ResourceBinding) -> wgpu::BindGroupLayoutEntry {
+        wgpu::BindGroupLayoutEntry {
+            binding: binding.binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: match &binding.resource_type {
+                ResourceType::UniformBuffer { .. } => wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                ResourceType::StorageBuffer { read_only, .. } => wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage {
+                        read_only: *read_only,
+                    },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                ResourceType::StorageTexture { format, access } => {
+                    wgpu::BindingType::StorageTexture {
+                        access: *access,
+                        format: *format,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    }
+                }
+                ResourceType::InputTexture => wgpu::BindingType::Texture {
+                    multisampled: false,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                ResourceType::ChannelTexture => wgpu::BindingType::Texture {
+                    multisampled: false,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                ResourceType::Sampler => {
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)
+                }
+            },
+            count: None,
+        }
+    }
+
+    /// Get all bindings for a specific group
+    pub fn get_bindings_for_group(&self, group: u32) -> Vec<&ResourceBinding> {
+        self.bindings.iter().filter(|b| b.group == group).collect()
+    }
+
+    /// Get binding by name
+    pub fn get_binding_by_name(&self, name: &str) -> Option<&ResourceBinding> {
+        self.bindings.iter().find(|b| b.name == name)
+    }
+}
+
+/// 4-Group Convention Implementation:
+/// @group(0): Per-Frame Resources (TimeUniform)
+/// @group(1): Primary Pass I/O & Parameters (output texture, shader params, input textures)
+/// @group(2): Global Engine Resources (fonts, audio, atomics, mouse)
+/// @group(3): User-Defined Data Buffers (custom storage buffers)
+impl ResourceLayout {
+    // GROUP 0: Per-Frame Resources
+    pub fn add_time_uniform(&mut self) {
+        self.add_resource(
+            0,
+            "time",
+            ResourceType::UniformBuffer {
+                size: std::mem::size_of::<super::ComputeTimeUniform>() as u64,
+            },
+        );
+    }
+
+    // GROUP 1: Primary Pass I/O & Parameters
+    pub fn add_output_texture(&mut self, format: wgpu::TextureFormat) {
+        self.add_resource(
+            1,
+            "output",
+            ResourceType::StorageTexture {
+                format,
+                access: wgpu::StorageTextureAccess::WriteOnly,
+            },
+        );
+    }
+
+    pub fn add_input_texture(&mut self) {
+        self.add_resource(1, "input_texture", ResourceType::InputTexture);
+        self.add_resource(1, "input_sampler", ResourceType::Sampler);
+    }
+
+    /// Add multi-pass input textures to Group 3 (up to 3 input textures with samplers)
+    // GROUP 2: Engine Resources including Channels
+    /// Add channel textures (channel0-channel3) for external media accessible from all passes
+    pub fn add_channel_textures(&mut self, num_channels: u32) {
+        for i in 0..num_channels {
+            let channel_name = format!("channel{i}");
+            let sampler_name = format!("channel{i}_sampler");
+
+            self.add_resource(2, &channel_name, ResourceType::ChannelTexture);
+            self.add_resource(2, &sampler_name, ResourceType::Sampler);
+        }
+    }
+
+    pub fn add_multipass_input_textures(&mut self, count: usize) {
+        // Add N input texture pairs for multi-pass dependencies
+        for i in 0..count {
+            self.add_resource(3, &format!("input_texture{i}"), ResourceType::InputTexture);
+            self.add_resource(3, &format!("input_sampler{i}"), ResourceType::Sampler);
+        }
+    }
+
+    pub fn add_custom_uniform(&mut self, name: &str, size: u64) {
+        self.add_resource(1, name, ResourceType::UniformBuffer { size });
+    }
+
+    // GROUP 2: Global Engine Resources
+    pub fn add_mouse_uniform(&mut self) {
+        self.add_resource(
+            2,
+            "mouse",
+            ResourceType::UniformBuffer {
+                size: std::mem::size_of::<crate::MouseUniform>() as u64,
+            },
+        );
+    }
+
+    pub fn add_font_resources(&mut self) {
+        self.add_resource(
+            2,
+            "font_texture_uniform",
+            ResourceType::UniformBuffer {
+                size: std::mem::size_of::<crate::FontUniforms>() as u64,
+            },
+        );
+        self.add_resource(2, "font_texture_atlas", ResourceType::InputTexture);
+    }
+
+    pub fn add_audio_buffer(&mut self, size: usize) {
+        self.add_resource(
+            2,
+            "audio_buffer",
+            ResourceType::StorageBuffer {
+                size: (size * std::mem::size_of::<f32>()) as u64,
+                read_only: false,
+            },
+        );
+    }
+
+    pub fn add_audio_spectrum_buffer(&mut self, size: usize) {
+        self.add_resource(
+            2,
+            "audio_spectrum",
+            ResourceType::StorageBuffer {
+                size: (size * std::mem::size_of::<f32>()) as u64,
+                read_only: true,
+            },
+        );
+    }
+
+    pub fn add_atomic_buffer(&mut self, size: u64) {
+        self.add_resource(
+            2,
+            "atomic_buffer",
+            ResourceType::StorageBuffer {
+                size,
+                read_only: false,
+            },
+        );
+    }
+
+    // GROUP 3: User-Defined Data Buffers
+    pub fn add_storage_buffer(&mut self, name: &str, size: u64) {
+        self.add_resource(
+            3,
+            name,
+            ResourceType::StorageBuffer {
+                size,
+                read_only: false,
+            },
+        );
+    }
+}

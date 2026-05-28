@@ -1,3 +1,4 @@
+use log::info;
 use wgpu::util::DeviceExt;
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -5,8 +6,7 @@ pub struct Vertex {
     pub position: [f32; 2],
 }
 impl Vertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 1] =
-        wgpu::vertex_attr_array![0 => Float32x2];
+    const ATTRIBS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x2];
 
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
@@ -19,6 +19,16 @@ impl Vertex {
 #[derive(Debug)]
 pub struct RenderPassWrapper<'a> {
     render_pass: wgpu::RenderPass<'a>,
+}
+
+impl<'a> RenderPassWrapper<'a> {
+    /// Extract the inner RenderPass for special cases like egui's forget_lifetime()
+    ///
+    /// We need this because Deref gives us &RenderPass but some methods
+    /// (like forget_lifetime) need owned RenderPass to consume it.
+    pub fn into_inner(self) -> wgpu::RenderPass<'a> {
+        self.render_pass
+    }
 }
 pub struct Renderer {
     pub render_pipeline: wgpu::RenderPipeline,
@@ -34,12 +44,20 @@ impl Renderer {
         fragment_entry: Option<&str>,
     ) -> Self {
         const VERTICES: &[Vertex] = &[
-            Vertex { position: [-1.0, -1.0] },
-            Vertex { position: [1.0, -1.0] },
-            Vertex { position: [-1.0, 1.0] },
-            Vertex { position: [1.0, 1.0] },
+            Vertex {
+                position: [-1.0, -1.0],
+            },
+            Vertex {
+                position: [1.0, -1.0],
+            },
+            Vertex {
+                position: [-1.0, 1.0],
+            },
+            Vertex {
+                position: [1.0, 1.0],
+            },
         ];
-        println!("Creating vertex buffer");
+        info!("Creating vertex buffer");
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
             contents: bytemuck::cast_slice(VERTICES),
@@ -53,7 +71,7 @@ impl Renderer {
             }),
             write_mask: wgpu::ColorWrites::ALL,
         })];
-        println!("Creating render pipeline"); 
+        info!("Creating render pipeline");
         let pipeline_desc = wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
             layout: Some(layout),
@@ -84,7 +102,7 @@ impl Renderer {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         };
 
@@ -95,6 +113,25 @@ impl Renderer {
             vertex_buffer,
         }
     }
+    /// Blit a bind group's texture to the screen in one call.
+    pub fn render_to_view(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        bind_group: &wgpu::BindGroup,
+    ) {
+        let mut render_pass = Self::begin_render_pass(
+            encoder,
+            view,
+            wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+            Some("Blit Pass"),
+        );
+        render_pass.set_pipeline(&self.render_pipeline);
+        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        render_pass.set_bind_group(0, bind_group, &[]);
+        render_pass.draw(0..4, 0..1);
+    }
+
     pub fn begin_render_pass<'a>(
         encoder: &'a mut wgpu::CommandEncoder,
         view: &'a wgpu::TextureView,
@@ -110,10 +147,12 @@ impl Renderer {
                     load: load_op,
                     store: wgpu::StoreOp::Store,
                 },
+                depth_slice: None,
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
 
         RenderPassWrapper { render_pass }

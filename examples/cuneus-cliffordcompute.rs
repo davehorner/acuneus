@@ -1,0 +1,333 @@
+use acuneus::compute::*;
+use acuneus::prelude::*;
+
+acuneus::uniform_params! {
+    struct CliffordParams {
+    a: f32,
+    b: f32,
+    c: f32,
+    d: f32,
+    motion_speed: f32,
+    rotation_x: f32,
+    rotation_y: f32,
+    click_state: i32,
+    brightness: f32,
+    color1_r: f32,
+    color1_g: f32,
+    color1_b: f32,
+    color2_r: f32,
+    color2_g: f32,
+    color2_b: f32,
+    scale: f32,
+    dof_amount: f32,
+    dof_focal_dist: f32,
+    _pad_m: [f32; 2],
+    }
+}
+
+struct CliffordShader {
+    base: RenderKit,
+    compute_shader: ComputeShader,
+    current_params: CliffordParams,
+    remote: acuneus::remote::RemoteRuntime,
+}
+
+impl CliffordShader {
+    fn clear_buffers(&mut self, core: &Core) {
+        self.compute_shader.clear_all_buffers(core);
+    }
+}
+
+impl ShaderManager for CliffordShader {
+    fn init(core: &Core) -> Self {
+        let base = RenderKit::new(core);
+
+        let initial_params = CliffordParams {
+            a: 1.7,
+            b: 1.7,
+            c: 0.6,
+            d: 1.2,
+            motion_speed: 1.0,
+            rotation_x: 0.0,
+            rotation_y: 0.0,
+            click_state: 0,
+            brightness: 0.00004,
+            color1_r: 0.0,
+            color1_g: 0.7,
+            color1_b: 1.0,
+            color2_r: 1.0,
+            color2_g: 0.3,
+            color2_b: 0.5,
+            scale: 0.6,
+            dof_amount: 1.0,
+            dof_focal_dist: 0.5,
+            _pad_m: [0.0; 2],
+        };
+
+        let mut config = ComputeShader::builder()
+            .with_entry_point("Splat")
+            .with_custom_uniforms::<CliffordParams>()
+            .with_atomic_buffer(2)
+            .with_workgroup_size([16, 16, 1])
+            .with_texture_format(COMPUTE_TEXTURE_FORMAT_RGBA16)
+            .with_label("Clifford Attractor Unified")
+            .build();
+
+        config.entry_points.push("main_image".to_string());
+
+        let compute_shader = acuneus::compute_shader!(core, "shaders/cliffordcompute.wgsl", config);
+
+        compute_shader.set_custom_params(initial_params, &core.queue);
+
+        Self {
+            base,
+            compute_shader,
+            current_params: initial_params,
+            remote: acuneus::remote::RemoteRuntime::new("cliffordcompute", 800, 600),
+        }
+    }
+
+    fn update(&mut self, core: &Core) {
+        // Handle export with custom dispatch pattern for cliffordcompute
+        self.compute_shader.handle_export_dispatch(
+            core,
+            &mut self.base,
+            |shader, encoder, core| {
+                shader.dispatch_stage_with_workgroups(encoder, 0, [2048, 1, 1]);
+                shader.dispatch_stage(encoder, core, 1);
+            },
+        );
+    }
+
+    fn resize(&mut self, core: &Core) {
+        self.base.default_resize(core, &mut self.compute_shader);
+    }
+
+    fn render(&mut self, core: &Core) -> Result<(), acuneus::SurfaceError> {
+        let mut frame = self.base.begin_frame(core)?;
+
+        let mut params = self.current_params;
+        let mut changed = false;
+        changed |= self
+            .remote
+            .drain(core, &mut self.base, &mut self.compute_shader, &mut params);
+        let mut should_start_export = false;
+        let mut export_request = self.base.export_manager.get_ui_request();
+        let remote_size = self.remote.resolution_size(core);
+        let mut controls_request = self.base.controls.get_ui_request(
+            &self.base.start_time,
+            &remote_size,
+            self.base.fps_tracker.fps(),
+        );
+        self.remote.apply_to_controls_request(&mut controls_request);
+        let full_output = if self.base.key_handler.show_ui {
+            self.base.render_ui(core, |ctx| {
+                RenderKit::apply_default_style(ctx);
+
+                egui::Window::new("Clifford Attractor")
+                    .collapsible(true)
+                    .resizable(true)
+                    .default_width(250.0)
+                    .show(ctx, |ui| {
+                        egui::CollapsingHeader::new("Attractor Parameters")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut params.a, -3.0..=3.0)
+                                            .text("Parameter A"),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut params.b, -3.0..=3.0)
+                                            .text("Parameter B"),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut params.c, -3.0..=3.0)
+                                            .text("Parameter C"),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut params.d, -3.0..=3.0)
+                                            .text("Parameter D"),
+                                    )
+                                    .changed();
+                                ui.separator();
+                                ui.label("Interesting presets:");
+                                if ui.button("Classic (1.5, 1.5, 1.4, 1.4)").clicked() {
+                                    params.a = 1.5;
+                                    params.b = 1.5;
+                                    params.c = 1.4;
+                                    params.d = 1.4;
+                                    changed = true;
+                                }
+                                if ui.button("Chaotic (1.7, 1.7, 0.6, 1.2)").clicked() {
+                                    params.a = 1.7;
+                                    params.b = 1.7;
+                                    params.c = 0.6;
+                                    params.d = 1.2;
+                                    changed = true;
+                                }
+                                if ui.button("Symmetric (2.0, -2.0, 1.0, 0.5)").clicked() {
+                                    params.a = 2.0;
+                                    params.b = -2.0;
+                                    params.c = 1.0;
+                                    params.d = 0.5;
+                                    changed = true;
+                                }
+                            });
+
+                        egui::CollapsingHeader::new("Visual Settings")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut params.motion_speed, 0.0..=3.0)
+                                            .text("Animation Speed"),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut params.brightness, 0.00001..=0.0001)
+                                            .logarithmic(true)
+                                            .text("Brightness"),
+                                    )
+                                    .changed();
+                                ui.separator();
+                                ui.label("Camera Controls:");
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut params.rotation_x, -1.0..=1.0)
+                                            .text("Rotation X"),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut params.rotation_y, -1.0..=1.0)
+                                            .text("Rotation Y"),
+                                    )
+                                    .changed();
+                                ui.separator();
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut params.scale, 0.1..=2.0)
+                                            .text("Attractor Scale"),
+                                    )
+                                    .changed();
+                            });
+
+                        egui::CollapsingHeader::new("Depth of Field")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut params.dof_amount, 0.0..=3.0)
+                                            .text("DOF Amount"),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut params.dof_focal_dist, 0.0..=1.0)
+                                            .text("Focal Distance"),
+                                    )
+                                    .changed();
+                                params.click_state = 1;
+                            });
+
+                        egui::CollapsingHeader::new("Colors")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("Color 1:");
+                                    let mut color =
+                                        [params.color1_r, params.color1_g, params.color1_b];
+                                    if ui.color_edit_button_rgb(&mut color).changed() {
+                                        params.color1_r = color[0];
+                                        params.color1_g = color[1];
+                                        params.color1_b = color[2];
+                                        changed = true;
+                                    }
+                                });
+
+                                ui.horizontal(|ui| {
+                                    ui.label("Color 2:");
+                                    let mut color =
+                                        [params.color2_r, params.color2_g, params.color2_b];
+                                    if ui.color_edit_button_rgb(&mut color).changed() {
+                                        params.color2_r = color[0];
+                                        params.color2_g = color[1];
+                                        params.color2_b = color[2];
+                                        changed = true;
+                                    }
+                                });
+                            });
+
+                        ui.separator();
+
+                        ShaderControls::render_controls_widget(ui, &mut controls_request);
+
+                        ui.separator();
+
+                        should_start_export =
+                            ExportManager::render_export_ui_widget(ui, &mut export_request);
+                    });
+            })
+        } else {
+            self.base.render_ui(core, |_ctx| {})
+        };
+
+        self.base.export_manager.apply_ui_request(export_request);
+        if controls_request.should_clear_buffers {
+            self.clear_buffers(core);
+        }
+        self.base.apply_control_request(controls_request);
+
+        let current_time = self.remote.time(&self.base);
+
+        let delta = self.remote.delta();
+        self.compute_shader
+            .set_time(current_time, delta, &core.queue);
+
+        if changed {
+            self.current_params = params;
+            self.compute_shader.set_custom_params(params, &core.queue);
+            self.remote.send_values(&params);
+        }
+
+        if should_start_export {
+            self.base.export_manager.start_export();
+        }
+
+        // Stage 0: Generate and splat particles (workgroup size [256, 1, 1])
+        self.compute_shader
+            .dispatch_stage_with_workgroups(&mut frame.encoder, 0, [2048, 1, 1]);
+
+        // Stage 1: Render to screen (workgroup size [16, 16, 1])
+        self.compute_shader
+            .dispatch_stage(&mut frame.encoder, core, 1);
+
+        self.base.renderer.render_to_view(
+            &mut frame.encoder,
+            &frame.view,
+            &self.compute_shader.get_output_texture().bind_group,
+        );
+
+        self.base.end_frame(core, frame, full_output);
+        Ok(())
+    }
+
+    fn handle_input(&mut self, core: &Core, event: &WindowEvent) -> bool {
+        self.base.default_handle_input(core, event)
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = env_logger::try_init();
+    let (app, event_loop) = acuneus::ShaderApp::new("Clifford", 800, 600);
+
+    app.run(event_loop, CliffordShader::init)
+}
