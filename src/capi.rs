@@ -8,7 +8,8 @@ use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 
 use crate::bin_registry::{
-    default_dimensions_for_bin, params_for_bin, title_for_bin, BinParamType, BINS,
+    default_dimensions_for_bin, info_for_bin, params_for_bin, title_for_bin, BinParamType, BINS,
+    BIN_FLAG_USES_KEYBOARD, BIN_FLAG_USES_MOUSE, BIN_INFOS,
 };
 
 #[cfg(windows)]
@@ -34,6 +35,8 @@ pub enum CuneusParamType {
     Color3 = 1,
     Action = 2,
     String = 3,
+    Bool = 4,
+    Select = 5,
 }
 
 #[repr(C)]
@@ -47,6 +50,19 @@ pub struct CuneusParamDesc {
     pub max_value: f32,
     pub default_value: f32,
     pub flags: u32,
+    pub options: *const c_char,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CuneusBinDesc {
+    pub name: *const c_char,
+    pub title: *const c_char,
+    pub source_file: *const c_char,
+    pub default_width: u32,
+    pub default_height: u32,
+    pub flags: u32,
+    pub keys: *const c_char,
 }
 
 pub struct CuneusInstance {
@@ -70,6 +86,8 @@ fn capi_param_type(param_type: BinParamType) -> CuneusParamType {
         BinParamType::Color3 => CuneusParamType::Color3,
         BinParamType::Action => CuneusParamType::Action,
         BinParamType::String => CuneusParamType::String,
+        BinParamType::Bool => CuneusParamType::Bool,
+        BinParamType::Select => CuneusParamType::Select,
     }
 }
 
@@ -232,11 +250,58 @@ pub extern "C" fn cuneus_bin_name(index: usize) -> *const c_char {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn cuneus_bin_desc(
+    index: usize,
+    out_desc: *mut CuneusBinDesc,
+) -> CuneusStatus {
+    let Some(out_desc) = out_desc.as_mut() else {
+        return CuneusStatus::Null;
+    };
+    let Some(info) = BIN_INFOS.get(index) else {
+        return CuneusStatus::NotFound;
+    };
+    *out_desc = CuneusBinDesc {
+        name: info.name.as_ptr(),
+        title: info.title.as_ptr(),
+        source_file: info.source_file.as_ptr(),
+        default_width: info.default_width,
+        default_height: info.default_height,
+        flags: info.flags,
+        keys: info.keys.as_ptr(),
+    };
+    CuneusStatus::Ok
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn cuneus_bin_title(bin_name: *const c_char) -> *const c_char {
     let Some(bin_name) = string_from_ptr(bin_name) else {
         return ptr::null();
     };
     title_for_bin(&bin_name).map_or(ptr::null(), |title| title.as_ptr())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cuneus_bin_keys(bin_name: *const c_char) -> *const c_char {
+    let Some(bin_name) = string_from_ptr(bin_name) else {
+        return ptr::null();
+    };
+    info_for_bin(&bin_name).map_or(ptr::null(), |info| info.keys.as_ptr())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cuneus_bin_uses_mouse(bin_name: *const c_char) -> bool {
+    let Some(bin_name) = string_from_ptr(bin_name) else {
+        return false;
+    };
+    info_for_bin(&bin_name).is_some_and(|info| info.flags & BIN_FLAG_USES_MOUSE != 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cuneus_bin_uses_keyboard(bin_name: *const c_char) -> bool {
+    let Some(bin_name) = string_from_ptr(bin_name) else {
+        return false;
+    };
+    info_for_bin(&bin_name).is_some_and(|info| info.flags & BIN_FLAG_USES_KEYBOARD != 0)
 }
 
 #[no_mangle]
@@ -502,6 +567,9 @@ pub unsafe extern "C" fn cuneus_param_desc(
         max_value: param.max_value,
         default_value: param.default_value,
         flags: param.flags,
+        options: param
+            .options
+            .map_or(ptr::null(), |options| options.as_ptr()),
     };
     CuneusStatus::Ok
 }
@@ -583,6 +651,24 @@ pub unsafe extern "C" fn cuneus_set_param_string(
         return CuneusStatus::InvalidArgument;
     };
     send(instance, format!("set_string {id} {value}"))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cuneus_set_param_bool(
+    instance: *mut CuneusInstance,
+    id: *const c_char,
+    value: bool,
+) -> CuneusStatus {
+    let Some(instance) = instance.as_ref() else {
+        return CuneusStatus::Null;
+    };
+    let Some(id) = string_from_ptr(id) else {
+        return CuneusStatus::InvalidArgument;
+    };
+    send(
+        instance,
+        format!("set_bool {id} {}", if value { 1 } else { 0 }),
+    )
 }
 
 #[no_mangle]
@@ -780,6 +866,28 @@ pub unsafe extern "C" fn cuneus_set_resolution(
         instance,
         format!("resolution {} {}", width.max(1), height.max(1)),
     )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cuneus_set_audio_spectrum(
+    instance: *mut CuneusInstance,
+    values: *const f32,
+    count: usize,
+) -> CuneusStatus {
+    let Some(instance) = instance.as_ref() else {
+        return CuneusStatus::Null;
+    };
+    if values.is_null() || count == 0 {
+        return CuneusStatus::InvalidArgument;
+    }
+
+    let values = std::slice::from_raw_parts(values, count.min(69));
+    let mut message = String::from("audio_spectrum");
+    for value in values {
+        message.push(' ');
+        message.push_str(&value.max(0.0).to_string());
+    }
+    send(instance, message)
 }
 
 #[no_mangle]

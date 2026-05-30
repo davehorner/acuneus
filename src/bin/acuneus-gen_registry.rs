@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::io;
@@ -10,6 +10,8 @@ enum ParamType {
     Color3,
     Action,
     String,
+    Bool,
+    Select,
 }
 
 #[derive(Clone, Debug)]
@@ -21,6 +23,7 @@ struct Param {
     min: f32,
     max: f32,
     default: f32,
+    options: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -36,6 +39,8 @@ struct Example {
     title: String,
     default_width: u32,
     default_height: u32,
+    uses_mouse: bool,
+    keys: Vec<String>,
     params: Vec<Param>,
 }
 
@@ -127,26 +132,45 @@ fn discover_examples(examples_dir: &Path) -> io::Result<Vec<Example>> {
                 continue;
             }
 
-            let param_type = match field.ty.as_str() {
+            let mut param_type = match field.ty.as_str() {
                 "f32" => ParamType::F32,
+                "bool" => ParamType::Bool,
+                "u32" if is_boolish_name(&field.name) => ParamType::Bool,
+                "u32" if field.name == "resolution" => ParamType::Select,
+                "i32" if field.name == "filter_type" => ParamType::Select,
                 "[f32; 3]" | "[f32;3]" => ParamType::Color3,
                 _ => continue,
             };
 
             let slider = slider_specs.get(&field.name);
-            let label = slider
+            let mut label = slider
                 .and_then(|spec| spec.label.clone())
                 .or_else(|| color_labels.get(&field.name).cloned())
                 .unwrap_or_else(|| title_case(&field.name));
-            let group = slider
+            let mut group = slider
                 .map(|spec| spec.group.clone())
                 .filter(|group| !group.is_empty())
                 .unwrap_or_else(|| "Parameters".to_string());
-            let (min, max) = slider.map_or(default_range(param_type), |spec| (spec.min, spec.max));
+            let (mut min, mut max) =
+                slider.map_or(default_range(param_type), |spec| (spec.min, spec.max));
             let default = defaults
                 .get(&field.name)
                 .copied()
                 .unwrap_or_else(|| default_value(param_type));
+            let mut options = None;
+            if let Some(spec) = select_spec(&field.name) {
+                param_type = ParamType::Select;
+                label = spec.label.to_string();
+                group = spec.group.to_string();
+                min = spec.min;
+                max = spec.max;
+                options = Some(spec.options.to_string());
+            } else if let Some(spec) = numeric_spec(&field.name) {
+                label = spec.label.to_string();
+                group = spec.group.to_string();
+                min = spec.min;
+                max = spec.max;
+            }
 
             params.push(Param {
                 name: field.name.clone(),
@@ -156,12 +180,15 @@ fn discover_examples(examples_dir: &Path) -> io::Result<Vec<Example>> {
                 min,
                 max,
                 default,
+                options,
             });
         }
 
         let (default_width, default_height) = parse_shader_app_size(&source).unwrap_or((800, 600));
         let title = parse_shader_app_title(&source).unwrap_or_else(|| title_case(&name));
-        append_builtin_controls(&source, &mut params);
+        let uses_mouse = source.contains(".with_mouse()") || source.contains("with_mouse()");
+        let keys = parse_keyboard_keys(&source);
+        append_builtin_controls(&source, uses_mouse, &keys, &mut params);
 
         let example = Example {
             name,
@@ -169,6 +196,8 @@ fn discover_examples(examples_dir: &Path) -> io::Result<Vec<Example>> {
             title,
             default_width,
             default_height,
+            uses_mouse,
+            keys,
             params,
         };
         if let Some(existing) = examples.iter_mut().find(|item| item.name == example.name) {
@@ -414,7 +443,24 @@ fn group_for_position(markers: &[(usize, String)], pos: usize) -> String {
         .unwrap_or_else(|| "Parameters".to_string())
 }
 
-fn append_builtin_controls(source: &str, params: &mut Vec<Param>) {
+fn append_builtin_controls(
+    source: &str,
+    uses_mouse: bool,
+    keys: &[String],
+    params: &mut Vec<Param>,
+) {
+    for key in keys {
+        push_f32(
+            params,
+            &format!("key_{}", key_param_suffix(key)),
+            &format!("Key {}", key.to_ascii_uppercase()),
+            "Keys",
+            0.0,
+            1.0,
+            0.0,
+        );
+    }
+
     if source.contains("render_media_panel(") {
         push_string(params, "media_path", "Media Path", "Media");
         push_action(params, "media_start_webcam", "Start Webcam", "Media");
@@ -453,6 +499,10 @@ fn append_builtin_controls(source: &str, params: &mut Vec<Param>) {
             "Transport",
         );
     }
+    if uses_mouse {
+        push_f32(params, "mouse_x", "Mouse X", "Mouse", 0.0, 1.0, 0.5);
+        push_f32(params, "mouse_y", "Mouse Y", "Mouse", 0.0, 1.0, 0.5);
+    }
 }
 
 fn push_string(params: &mut Vec<Param>, name: &str, label: &str, group: &str) {
@@ -464,6 +514,7 @@ fn push_string(params: &mut Vec<Param>, name: &str, label: &str, group: &str) {
         min: 0.0,
         max: 1.0,
         default: 0.0,
+        options: None,
     });
 }
 
@@ -476,6 +527,7 @@ fn push_action(params: &mut Vec<Param>, name: &str, label: &str, group: &str) {
         min: 0.0,
         max: 1.0,
         default: 0.0,
+        options: None,
     });
 }
 
@@ -496,7 +548,84 @@ fn push_f32(
         min,
         max,
         default,
+        options: None,
     });
+}
+
+fn parse_keyboard_keys(source: &str) -> Vec<String> {
+    let mut keys = BTreeSet::new();
+
+    for marker in source.match_indices("KeyCode::Key") {
+        let rest = &source[marker.0 + "KeyCode::Key".len()..];
+        if let Some(ch) = rest.chars().next().filter(|ch| ch.is_ascii_uppercase()) {
+            keys.insert(ch.to_ascii_lowercase().to_string());
+        }
+    }
+
+    for marker in source.match_indices("KeyCode::Digit") {
+        let rest = &source[marker.0 + "KeyCode::Digit".len()..];
+        if let Some(ch) = rest.chars().next().filter(|ch| ch.is_ascii_digit()) {
+            keys.insert(ch.to_string());
+        }
+    }
+
+    for marker in source.match_indices("egui::Key::Num") {
+        let rest = &source[marker.0 + "egui::Key::Num".len()..];
+        if let Some(ch) = rest.chars().next().filter(|ch| ch.is_ascii_digit()) {
+            keys.insert(ch.to_string());
+        }
+    }
+
+    if source.contains("to_digit(10)") && source.contains("1..=9") {
+        for ch in '1'..='9' {
+            keys.insert(ch.to_string());
+        }
+    }
+
+    for marker in source.match_indices("matches!(") {
+        let snippet = &source[marker.0..source.len().min(marker.0 + 220)];
+        collect_single_char_literals(snippet, &mut keys);
+    }
+
+    for marker in source.match_indices("as_str() ==") {
+        let snippet = &source[marker.0..source.len().min(marker.0 + 80)];
+        collect_single_char_literals(snippet, &mut keys);
+    }
+
+    for marker in source.match_indices("key ==") {
+        let snippet = &source[marker.0..source.len().min(marker.0 + 80)];
+        collect_single_char_literals(snippet, &mut keys);
+    }
+
+    keys.into_iter().collect()
+}
+
+fn collect_single_char_literals(snippet: &str, keys: &mut BTreeSet<String>) {
+    let bytes = snippet.as_bytes();
+    let mut i = 0;
+    while i + 2 < bytes.len() {
+        if bytes[i] == b'"' && bytes[i + 2] == b'"' {
+            let ch = bytes[i + 1] as char;
+            if ch.is_ascii_alphanumeric() {
+                keys.insert(ch.to_ascii_lowercase().to_string());
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn key_param_suffix(key: &str) -> String {
+    key.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn parse_color_labels(source: &str) -> BTreeMap<String, String> {
@@ -558,7 +687,7 @@ fn render_registry(examples: &[Example]) -> String {
     let mut out = String::new();
     out.push_str("use std::ffi::CStr;\n\n");
     out.push_str("#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n");
-    out.push_str("pub enum BinParamType {\n    F32,\n    Color3,\n    Action,\n    String,\n}\n\n");
+    out.push_str("pub enum BinParamType {\n    F32,\n    Color3,\n    Action,\n    String,\n    Bool,\n    Select,\n}\n\n");
     out.push_str("#[derive(Clone, Copy, Debug)]\n");
     out.push_str("pub struct BinParamSpec {\n");
     out.push_str("    pub id: &'static CStr,\n");
@@ -569,11 +698,28 @@ fn render_registry(examples: &[Example]) -> String {
     out.push_str("    pub max_value: f32,\n");
     out.push_str("    pub default_value: f32,\n");
     out.push_str("    pub flags: u32,\n");
+    out.push_str("    pub options: Option<&'static CStr>,\n");
     out.push_str("}\n\n");
     out.push_str("impl BinParamSpec {\n");
     out.push_str("    pub fn id_str(&self) -> &'static str {\n        self.id.to_str().unwrap_or(\"\")\n    }\n\n");
     out.push_str("    pub fn label_str(&self) -> &'static str {\n        self.label.to_str().unwrap_or(\"\")\n    }\n\n");
-    out.push_str("    pub fn group_str(&self) -> &'static str {\n        self.group.to_str().unwrap_or(\"\")\n    }\n");
+    out.push_str("    pub fn group_str(&self) -> &'static str {\n        self.group.to_str().unwrap_or(\"\")\n    }\n\n");
+    out.push_str("    pub fn options_str(&self) -> Option<&'static str> {\n        self.options.and_then(|options| options.to_str().ok())\n    }\n");
+    out.push_str("}\n\n");
+    out.push_str("pub const BIN_FLAG_USES_MOUSE: u32 = 1 << 0;\n");
+    out.push_str("pub const BIN_FLAG_USES_KEYBOARD: u32 = 1 << 1;\n\n");
+    out.push_str("#[derive(Clone, Copy, Debug)]\n");
+    out.push_str("pub struct BinInfo {\n");
+    out.push_str("    pub name: &'static CStr,\n");
+    out.push_str("    pub title: &'static CStr,\n");
+    out.push_str("    pub source_file: &'static CStr,\n");
+    out.push_str("    pub default_width: u32,\n");
+    out.push_str("    pub default_height: u32,\n");
+    out.push_str("    pub flags: u32,\n");
+    out.push_str("    pub keys: &'static CStr,\n");
+    out.push_str("}\n\n");
+    out.push_str("impl BinInfo {\n");
+    out.push_str("    pub fn name_str(&self) -> &'static str {\n        self.name.to_str().unwrap_or(\"\")\n    }\n\n");
     out.push_str("}\n\n");
     out.push_str("macro_rules! cstr {\n");
     out.push_str("    ($value:literal) => {\n");
@@ -582,19 +728,27 @@ fn render_registry(examples: &[Example]) -> String {
     out.push_str("}\n\n");
     out.push_str("macro_rules! f32_param {\n");
     out.push_str("    ($id:literal, $label:literal, $group:literal, $min:expr, $max:expr, $default:expr) => {\n");
-    out.push_str("        BinParamSpec {\n            id: cstr!($id),\n            label: cstr!($label),\n            group: cstr!($group),\n            param_type: BinParamType::F32,\n            min_value: $min,\n            max_value: $max,\n            default_value: $default,\n            flags: 0,\n        }\n    };\n");
+    out.push_str("        BinParamSpec {\n            id: cstr!($id),\n            label: cstr!($label),\n            group: cstr!($group),\n            param_type: BinParamType::F32,\n            min_value: $min,\n            max_value: $max,\n            default_value: $default,\n            flags: 0,\n            options: None,\n        }\n    };\n");
     out.push_str("}\n\n");
     out.push_str("macro_rules! color3_param {\n");
     out.push_str("    ($id:literal, $label:literal, $group:literal, $min:expr, $max:expr, $default:expr) => {\n");
-    out.push_str("        BinParamSpec {\n            id: cstr!($id),\n            label: cstr!($label),\n            group: cstr!($group),\n            param_type: BinParamType::Color3,\n            min_value: $min,\n            max_value: $max,\n            default_value: $default,\n            flags: 0,\n        }\n    };\n");
+    out.push_str("        BinParamSpec {\n            id: cstr!($id),\n            label: cstr!($label),\n            group: cstr!($group),\n            param_type: BinParamType::Color3,\n            min_value: $min,\n            max_value: $max,\n            default_value: $default,\n            flags: 0,\n            options: None,\n        }\n    };\n");
     out.push_str("}\n\n");
     out.push_str("macro_rules! action_param {\n");
     out.push_str("    ($id:literal, $label:literal, $group:literal) => {\n");
-    out.push_str("        BinParamSpec {\n            id: cstr!($id),\n            label: cstr!($label),\n            group: cstr!($group),\n            param_type: BinParamType::Action,\n            min_value: 0.0,\n            max_value: 1.0,\n            default_value: 0.0,\n            flags: 1,\n        }\n    };\n");
+    out.push_str("        BinParamSpec {\n            id: cstr!($id),\n            label: cstr!($label),\n            group: cstr!($group),\n            param_type: BinParamType::Action,\n            min_value: 0.0,\n            max_value: 1.0,\n            default_value: 0.0,\n            flags: 1,\n            options: None,\n        }\n    };\n");
     out.push_str("}\n\n");
     out.push_str("macro_rules! string_param {\n");
     out.push_str("    ($id:literal, $label:literal, $group:literal) => {\n");
-    out.push_str("        BinParamSpec {\n            id: cstr!($id),\n            label: cstr!($label),\n            group: cstr!($group),\n            param_type: BinParamType::String,\n            min_value: 0.0,\n            max_value: 1.0,\n            default_value: 0.0,\n            flags: 0,\n        }\n    };\n");
+    out.push_str("        BinParamSpec {\n            id: cstr!($id),\n            label: cstr!($label),\n            group: cstr!($group),\n            param_type: BinParamType::String,\n            min_value: 0.0,\n            max_value: 1.0,\n            default_value: 0.0,\n            flags: 0,\n            options: None,\n        }\n    };\n");
+    out.push_str("}\n\n");
+    out.push_str("macro_rules! bool_param {\n");
+    out.push_str("    ($id:literal, $label:literal, $group:literal, $default:expr) => {\n");
+    out.push_str("        BinParamSpec {\n            id: cstr!($id),\n            label: cstr!($label),\n            group: cstr!($group),\n            param_type: BinParamType::Bool,\n            min_value: 0.0,\n            max_value: 1.0,\n            default_value: $default,\n            flags: 0,\n            options: None,\n        }\n    };\n");
+    out.push_str("}\n\n");
+    out.push_str("macro_rules! select_param {\n");
+    out.push_str("    ($id:literal, $label:literal, $group:literal, $min:expr, $max:expr, $default:expr, $options:literal) => {\n");
+    out.push_str("        BinParamSpec {\n            id: cstr!($id),\n            label: cstr!($label),\n            group: cstr!($group),\n            param_type: BinParamType::Select,\n            min_value: $min,\n            max_value: $max,\n            default_value: $default,\n            flags: 0,\n            options: Some(cstr!($options)),\n        }\n    };\n");
     out.push_str("}\n\n");
 
     for example in examples {
@@ -608,6 +762,8 @@ fn render_registry(examples: &[Example]) -> String {
                 ParamType::Color3 => "color3_param",
                 ParamType::Action => "action_param",
                 ParamType::String => "string_param",
+                ParamType::Bool => "bool_param",
+                ParamType::Select => "select_param",
             };
             if param.param_type == ParamType::Action || param.param_type == ParamType::String {
                 out.push_str(&format!(
@@ -615,6 +771,25 @@ fn render_registry(examples: &[Example]) -> String {
                     param.name,
                     escape_string(&param.label),
                     escape_string(&param.group)
+                ));
+            } else if param.param_type == ParamType::Bool {
+                out.push_str(&format!(
+                    "    {macro_name}!(\"{}\", \"{}\", \"{}\", {}),\n",
+                    param.name,
+                    escape_string(&param.label),
+                    escape_string(&param.group),
+                    fmt_f32(param.default)
+                ));
+            } else if param.param_type == ParamType::Select {
+                out.push_str(&format!(
+                    "    {macro_name}!(\"{}\", \"{}\", \"{}\", {}, {}, {}, \"{}\"),\n",
+                    param.name,
+                    escape_string(&param.label),
+                    escape_string(&param.group),
+                    fmt_f32(param.min),
+                    fmt_f32(param.max),
+                    fmt_f32(param.default),
+                    escape_string(param.options.as_deref().unwrap_or(""))
                 ));
             } else {
                 out.push_str(&format!(
@@ -636,6 +811,37 @@ fn render_registry(examples: &[Example]) -> String {
         out.push_str(&format!("    cstr!(\"{}\"),\n", example.name));
     }
     out.push_str("];\n\n");
+
+    out.push_str("pub const BIN_INFOS: &[BinInfo] = &[\n");
+    for example in examples {
+        let mut flags = Vec::new();
+        if example.uses_mouse {
+            flags.push("BIN_FLAG_USES_MOUSE");
+        }
+        if !example.keys.is_empty() {
+            flags.push("BIN_FLAG_USES_KEYBOARD");
+        }
+        let flags = if flags.is_empty() {
+            "0".to_string()
+        } else {
+            flags.join(" | ")
+        };
+        out.push_str(&format!(
+            "    BinInfo {{ name: cstr!(\"{}\"), title: cstr!(\"{}\"), source_file: cstr!(\"{}\"), default_width: {}, default_height: {}, flags: {}, keys: cstr!(\"{}\") }},\n",
+            example.name,
+            escape_string(&example.title),
+            escape_string(&example.source_file),
+            example.default_width,
+            example.default_height,
+            flags,
+            escape_string(&example.keys.join("|"))
+        ));
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("pub fn info_for_bin(bin_name: &str) -> Option<&'static BinInfo> {\n");
+    out.push_str("    BIN_INFOS.iter().find(|info| info.name_str() == bin_name)\n");
+    out.push_str("}\n\n");
 
     out.push_str("pub fn title_for_bin(bin_name: &str) -> Option<&'static CStr> {\n");
     out.push_str("    match bin_name {\n");
@@ -681,16 +887,74 @@ fn is_padding(name: &str) -> bool {
     name.starts_with("_pad") || name.to_ascii_lowercase().contains("pad")
 }
 
+fn is_boolish_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with("_enabled") || lower.starts_with("enable_") || lower.starts_with("use_")
+}
+
 fn default_range(param_type: ParamType) -> (f32, f32) {
     match param_type {
-        ParamType::F32 | ParamType::Color3 | ParamType::Action | ParamType::String => (0.0, 1.0),
+        ParamType::F32
+        | ParamType::Color3
+        | ParamType::Action
+        | ParamType::String
+        | ParamType::Bool
+        | ParamType::Select => (0.0, 1.0),
     }
 }
 
 fn default_value(param_type: ParamType) -> f32 {
     match param_type {
         ParamType::F32 | ParamType::Color3 => 0.5,
-        ParamType::Action | ParamType::String => 0.0,
+        ParamType::Action | ParamType::String | ParamType::Bool | ParamType::Select => 0.0,
+    }
+}
+
+struct SelectSpec {
+    label: &'static str,
+    group: &'static str,
+    min: f32,
+    max: f32,
+    options: &'static str,
+}
+
+fn select_spec(name: &str) -> Option<SelectSpec> {
+    match name {
+        "filter_type" => Some(SelectSpec {
+            label: "Filter Type",
+            group: "FFT Mode",
+            min: 0.0,
+            max: 3.0,
+            options: "0=LP|1=HP|2=BP|3=Directional",
+        }),
+        "resolution" => Some(SelectSpec {
+            label: "FFT Resolution",
+            group: "FFT Mode",
+            min: 256.0,
+            max: 2048.0,
+            options: "256=256|512=512|1024=1024|2048=2048",
+        }),
+        _ => None,
+    }
+}
+
+fn numeric_spec(name: &str) -> Option<SelectSpec> {
+    match name {
+        "filter_direction" => Some(SelectSpec {
+            label: "Direction",
+            group: "FFT Filter",
+            min: 0.0,
+            max: std::f32::consts::TAU,
+            options: "",
+        }),
+        "filter_radius" => Some(SelectSpec {
+            label: "Band Radius",
+            group: "FFT Filter",
+            min: 0.0,
+            max: std::f32::consts::TAU,
+            options: "",
+        }),
+        _ => None,
     }
 }
 

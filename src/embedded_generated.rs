@@ -3,7 +3,42 @@
 pub fn can_run_bin(bin_name: &str) -> bool {
     matches!(
         bin_name,
- "roto" | "2dneuron" | "audiovis" | "blockgame" | "buddhabrot" | "cliffordcompute" | "cnn" | "computecolors" | "cuneus" | "debugscreen" | "fft" | "fluid" | "gaussian" | "gaussian3d" | "jfa" | "kuwahara" | "lego" | "lich" | "mandelbulb" | "matrix" | "nebula" | "orbits" | "pathtracing" | "physarum" | "rorschach" | "scenecolor" | "sdvert" | "sinh" | "spiralchaos" | "synth" | "system" | "tameimp" | "tree" | "veridisquo" | "volumepassage" | "voronoi"
+        "roto"
+            | "2dneuron"
+            | "audiovis"
+            | "blockgame"
+            | "buddhabrot"
+            | "cliffordcompute"
+            | "cnn"
+            | "computecolors"
+            | "cuneus"
+            | "debugscreen"
+            | "fft"
+            | "fluid"
+            | "gaussian"
+            | "gaussian3d"
+            | "jfa"
+            | "kuwahara"
+            | "lego"
+            | "lich"
+            | "mandelbulb"
+            | "matrix"
+            | "nebula"
+            | "orbits"
+            | "pathtracing"
+            | "physarum"
+            | "rorschach"
+            | "scenecolor"
+            | "sdvert"
+            | "sinh"
+            | "spiralchaos"
+            | "synth"
+            | "system"
+            | "tameimp"
+            | "tree"
+            | "veridisquo"
+            | "volumepassage"
+            | "voronoi"
     )
 }
 
@@ -336,4 +371,3 @@ mod voronoi {
         main()
     }
 }
-

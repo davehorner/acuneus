@@ -15,6 +15,7 @@ pub struct ControlsRequest {
 
     // Video reqs
     pub load_media_path: Option<PathBuf>,
+    pub unload_media: bool,
     pub play_video: bool,
     pub pause_video: bool,
     pub restart_video: bool,
@@ -60,6 +61,7 @@ impl Default for ControlsRequest {
 
             // Video-related stuff
             load_media_path: default_media,
+            unload_media: false,
             play_video: should_play_video,
             pause_video: false,
             restart_video: false,
@@ -171,6 +173,7 @@ impl ShaderControls {
             current_fps: Some(fps),
 
             load_media_path,
+            unload_media: false,
             play_video,
             pause_video: false,
             restart_video: false,
@@ -258,12 +261,16 @@ impl ShaderControls {
                             .add_filter(
                                 "Media Files",
                                 &[
-                                    "png", "jpg", "jpeg", "mp4", "avi", "mkv", "webm", "mov",
-                                    "mp3", "wav", "ogg",
+                                    "png", "jpg", "jpeg", "gif", "mp4", "avi", "mkv", "webm",
+                                    "mov", "mp3", "wav", "ogg",
                                 ],
                             )
-                            .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "tiff"])
+                            .add_filter(
+                                "Images",
+                                &["png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff"],
+                            )
                             .add_filter("Videos", &["mp4", "avi", "mkv", "webm", "mov"])
+                            .add_filter("Animated GIFs", &["gif"])
                             .add_filter("HDRI", &["hdr", "exr"])
                             .pick_file()
                         {

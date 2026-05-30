@@ -107,18 +107,40 @@ impl VideoTextureManager {
         info!("Creating video texture from: {path_str}");
 
         let pipeline = gst::Pipeline::new();
+        let is_uri = path_str
+            .split_once("://")
+            .map(|(scheme, _)| {
+                !scheme.is_empty()
+                    && scheme
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+            })
+            .unwrap_or(false);
 
-        // Source element - read from file
-        let filesrc = gst::ElementFactory::make("filesrc")
-            .name("source")
-            .property("location", &path_str)
-            .build()
-            .map_err(|_| anyhow!("Failed to create filesrc element"))?;
-        // Decoding element
-        let decodebin = gst::ElementFactory::make("decodebin")
-            .name("decoder")
-            .build()
-            .map_err(|_| anyhow!("Failed to create decodebin element"))?;
+        let filesrc = if is_uri {
+            None
+        } else {
+            Some(
+                gst::ElementFactory::make("filesrc")
+                    .name("source")
+                    .property("location", &path_str)
+                    .build()
+                    .map_err(|_| anyhow!("Failed to create filesrc element"))?,
+            )
+        };
+
+        let decodebin = if is_uri {
+            gst::ElementFactory::make("uridecodebin")
+                .name("decoder")
+                .property("uri", &path_str)
+                .build()
+                .map_err(|_| anyhow!("Failed to create uridecodebin element"))?
+        } else {
+            gst::ElementFactory::make("decodebin")
+                .name("decoder")
+                .build()
+                .map_err(|_| anyhow!("Failed to create decodebin element"))?
+        };
 
         // videorate element to enforce correct frame timing
         let videorate = gst::ElementFactory::make("videorate")
@@ -157,9 +179,14 @@ impl VideoTextureManager {
         appsink.set_sync(true);
 
         // video elements goes to the pipeline
+        if let Some(filesrc) = &filesrc {
+            pipeline
+                .add(filesrc)
+                .map_err(|_| anyhow!("Failed to add filesrc to pipeline"))?;
+        }
+
         pipeline
             .add_many([
-                &filesrc,
                 &decodebin,
                 &videorate,
                 &videoconvert,
@@ -172,8 +199,10 @@ impl VideoTextureManager {
         gst::Element::link_many([&videorate, &videoconvert, &capsfilter, appsink.upcast_ref()])
             .map_err(|_| anyhow!("Failed to link video elements"))?;
 
-        gst::Element::link_many([&filesrc, &decodebin])
-            .map_err(|_| anyhow!("Failed to link filesrc to decodebin"))?;
+        if let Some(filesrc) = &filesrc {
+            gst::Element::link_many([filesrc, &decodebin])
+                .map_err(|_| anyhow!("Failed to link filesrc to decodebin"))?;
+        }
 
         // Set up pad-added signal for dynamic linking from decodebin -> videorate
         let videorate_weak = videorate.downgrade();

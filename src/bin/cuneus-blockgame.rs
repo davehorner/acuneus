@@ -110,6 +110,21 @@ impl ShaderManager for BlockTowerGame {
         self.compute_shader
             .update_mouse_uniform(&self.base.mouse_tracker.uniform, &core.queue);
 
+        let camera_speed = 0.5 * delta * 60.0;
+        let rotation_speed = 0.1 * delta * 60.0;
+        if self.remote.key_down("key_q") {
+            self.game_params.camera_height += camera_speed;
+        }
+        if self.remote.key_down("key_e") {
+            self.game_params.camera_height -= camera_speed;
+        }
+        if self.remote.key_down("key_w") {
+            self.game_params.camera_angle += rotation_speed;
+        }
+        if self.remote.key_down("key_s") {
+            self.game_params.camera_angle -= rotation_speed;
+        }
+
         self.update_camera_in_shader(&core.queue);
         let mouse_buttons = self.base.mouse_tracker.uniform.buttons[0];
         let mouse_pressed = mouse_buttons & 1 != 0;

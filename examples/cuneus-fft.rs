@@ -25,6 +25,36 @@ struct FFTShader {
     remote: acuneus::remote::RemoteRuntime,
 }
 
+impl FFTShader {
+    fn sanitize_params(params: &mut FFTParams) -> bool {
+        let old_filter_type = params.filter_type;
+        let old_filter_direction = params.filter_direction;
+        let old_filter_radius = params.filter_radius;
+        let old_show_freqs = params.show_freqs;
+        let old_resolution = params.resolution;
+        let old_is_bw = params.is_bw;
+
+        params.filter_type = params.filter_type.clamp(0, 3);
+        params.filter_direction = params.filter_direction.clamp(0.0, std::f32::consts::TAU);
+        params.filter_radius = params.filter_radius.clamp(0.0, std::f32::consts::TAU);
+        params.show_freqs = if params.show_freqs >= 1 { 1 } else { 0 };
+        params.is_bw = if params.is_bw >= 1 { 1 } else { 0 };
+
+        const RESOLUTIONS: [u32; 4] = [256, 512, 1024, 2048];
+        params.resolution = RESOLUTIONS
+            .into_iter()
+            .min_by_key(|resolution| resolution.abs_diff(params.resolution))
+            .unwrap_or(1024);
+
+        old_filter_type != params.filter_type
+            || old_filter_direction != params.filter_direction
+            || old_filter_radius != params.filter_radius
+            || old_show_freqs != params.show_freqs
+            || old_resolution != params.resolution
+            || old_is_bw != params.is_bw
+    }
+}
+
 impl ShaderManager for FFTShader {
     fn init(core: &Core) -> Self {
         let initial_params = FFTParams {
@@ -55,6 +85,7 @@ impl ShaderManager for FFTShader {
             .with_multi_pass(&passes)
             .with_input_texture() // Re-enable input texture support
             .with_custom_uniforms::<FFTParams>()
+            .with_audio_spectrum(69)
             .with_storage_buffer(StorageBufferSpec::new("image_data", 2048 * 2048 * 3 * 8)) // FFT working memory: max res to avoid crash
             .with_workgroup_size([16, 16, 1])
             .with_texture_format(COMPUTE_TEXTURE_FORMAT_RGBA16)
@@ -92,6 +123,11 @@ impl ShaderManager for FFTShader {
                 &core.device,
             );
         }
+        self.base.update_audio_spectrum(&core.queue);
+        self.compute_shader
+            .update_audio_spectrum(&self.base.resolution_uniform.data, &core.queue);
+        self.remote
+            .send_audio_spectrum(&self.base.resolution_uniform.data);
         // Handle export
         self.compute_shader.handle_export(core, &mut self.base);
     }
@@ -289,6 +325,10 @@ impl ShaderManager for FFTShader {
         }
         if controls_request.start_webcam {
             self.should_initialize = true;
+        }
+
+        if Self::sanitize_params(&mut params) {
+            changed = true;
         }
 
         // Apply parameter changes

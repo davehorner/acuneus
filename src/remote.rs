@@ -1,17 +1,19 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use rosc::{encoder, OscMessage, OscPacket, OscType};
 
 pub use crate::bin_registry::{params_for_bin, BinParamSpec, BinParamType};
-use crate::{compute::ComputeShader, Core, RenderKit};
+use crate::{compute::ComputeShader, Core, RenderKit, ResolutionUniform};
 #[derive(Clone, Debug)]
 pub enum RemoteCommand {
     SetF32 { id: String, value: f32 },
     SetColor3 { id: String, value: [f32; 3] },
     SetString { id: String, value: String },
+    SetBool { id: String, value: bool },
     Pulse { velocity: f32 },
     Note { pitch: f32, velocity: f32 },
     Transport { bpm: f32, beat: f32, measure: f32 },
@@ -26,6 +28,7 @@ pub enum RemoteCommand {
     Time { seconds: f32 },
     Fps { fps: f32 },
     Resolution { width: u32, height: u32 },
+    AudioSpectrum { values: Vec<f32> },
     Action { id: String, value: f32 },
     LoadMedia { path: String },
     Discover,
@@ -37,6 +40,21 @@ pub enum RemoteValue {
     F32(f32),
     Color3([f32; 3]),
     String(String),
+    Bool(bool),
+}
+
+fn media_path_from_string(value: String) -> PathBuf {
+    let trimmed = value.trim();
+    let unquoted = trimmed
+        .strip_prefix('"')
+        .and_then(|path| path.strip_suffix('"'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|path| path.strip_suffix('\''))
+        })
+        .unwrap_or(trimmed);
+    PathBuf::from(unquoted)
 }
 
 pub trait RemoteField {
@@ -53,6 +71,10 @@ impl RemoteField for f32 {
             }
             RemoteValue::Color3(_) => false,
             RemoteValue::String(_) => false,
+            RemoteValue::Bool(value) => {
+                *self = if value { 1.0 } else { 0.0 };
+                true
+            }
         }
     }
 
@@ -70,6 +92,7 @@ impl RemoteField for [f32; 3] {
             }
             RemoteValue::F32(_) => false,
             RemoteValue::String(_) => false,
+            RemoteValue::Bool(_) => false,
         }
     }
 
@@ -87,6 +110,10 @@ impl RemoteField for u32 {
             }
             RemoteValue::Color3(_) => false,
             RemoteValue::String(_) => false,
+            RemoteValue::Bool(value) => {
+                *self = u32::from(value);
+                true
+            }
         }
     }
 
@@ -104,6 +131,10 @@ impl RemoteField for i32 {
             }
             RemoteValue::Color3(_) => false,
             RemoteValue::String(_) => false,
+            RemoteValue::Bool(value) => {
+                *self = i32::from(value);
+                true
+            }
         }
     }
 
@@ -128,6 +159,7 @@ macro_rules! ignored_remote_field {
 
 ignored_remote_field!([f32; 2]);
 ignored_remote_field!([f32; 4]);
+ignored_remote_field!([u32; 3]);
 ignored_remote_field!([[f32; 4]; 3]);
 ignored_remote_field!([[f32; 4]; 4]);
 ignored_remote_field!([[f32; 4]; 8]);
@@ -154,6 +186,7 @@ struct RemoteControlsPatch {
     should_reset: bool,
     should_clear_buffers: bool,
     load_media_path: Option<std::path::PathBuf>,
+    unload_media: bool,
     play_video: bool,
     pause_video: bool,
     restart_video: bool,
@@ -182,6 +215,10 @@ pub struct RemoteRuntime {
     remote_time: Option<f32>,
     remote_fps: f32,
     remote_resolution: Option<(u32, u32)>,
+    remote_audio_spectrum: Option<[f32; 69]>,
+    remote_notes: Vec<(f32, f32)>,
+    remote_key_states: BTreeMap<String, bool>,
+    remote_key_events: Vec<(String, bool)>,
     controls_patch: RemoteControlsPatch,
 }
 
@@ -199,7 +236,38 @@ impl RemoteRuntime {
             remote_time: None,
             remote_fps: 60.0,
             remote_resolution: None,
+            remote_audio_spectrum: None,
+            remote_notes: Vec::new(),
+            remote_key_states: BTreeMap::new(),
+            remote_key_events: Vec::new(),
             controls_patch: RemoteControlsPatch::default(),
+        }
+    }
+
+    pub fn has_feedback_target(&self) -> bool {
+        self.control
+            .as_ref()
+            .map_or(false, |control| control.has_feedback_target())
+    }
+
+    pub fn send_audio_pcm(&self, samples: &[f32]) {
+        if let Some(control) = &self.control {
+            control.send_audio_pcm(samples);
+        }
+    }
+
+    pub fn send_audio_spectrum(&self, resolution: &ResolutionUniform) {
+        if let Some(control) = &self.control {
+            let mut values = [0.0f32; 69];
+            for i in 0..64 {
+                values[i] = resolution.audio_data[i / 4][i % 4];
+            }
+            values[64] = resolution.bpm;
+            values[65] = resolution.bass_energy;
+            values[66] = resolution.mid_energy;
+            values[67] = resolution.high_energy;
+            values[68] = resolution.total_energy;
+            control.send_audio_spectrum(&values);
         }
     }
 
@@ -240,6 +308,7 @@ impl RemoteRuntime {
         if self.controls_patch.load_media_path.is_some() {
             request.load_media_path = self.controls_patch.load_media_path.take();
         }
+        request.unload_media |= self.controls_patch.unload_media;
         request.play_video |= self.controls_patch.play_video;
         request.pause_video |= self.controls_patch.pause_video;
         request.restart_video |= self.controls_patch.restart_video;
@@ -260,6 +329,7 @@ impl RemoteRuntime {
         request.stop_webcam |= self.controls_patch.stop_webcam;
         self.controls_patch.should_reset = false;
         self.controls_patch.should_clear_buffers = false;
+        self.controls_patch.unload_media = false;
         self.controls_patch.play_video = false;
         self.controls_patch.pause_video = false;
         self.controls_patch.restart_video = false;
@@ -268,13 +338,26 @@ impl RemoteRuntime {
         self.controls_patch.stop_webcam = false;
     }
 
-    fn apply_builtin_value(&mut self, id: &str, value: f32) -> bool {
+    fn apply_builtin_value(&mut self, base: &mut RenderKit, id: &str, value: f32) -> bool {
         match id {
             "control_pause" => self.controls_patch.is_paused = Some(value >= 0.5),
             "video_loop" => self.controls_patch.set_loop = Some(value >= 0.5),
             "video_mute" => self.controls_patch.mute_audio = Some(value >= 0.5),
             "video_volume" => self.controls_patch.set_volume = Some(value.clamp(0.0, 1.0) as f64),
             "video_seek" => self.controls_patch.seek_position = Some(value.max(0.0) as f64),
+            "mouse_x" => {
+                let value = value.clamp(0.0, 1.0);
+                base.mouse_tracker.uniform.position[0] = value;
+                base.mouse_tracker.raw_position[0] =
+                    value * base.resolution_uniform.data.dimensions[0];
+            }
+            "mouse_y" => {
+                let value = value.clamp(0.0, 1.0);
+                base.mouse_tracker.uniform.position[1] = value;
+                base.mouse_tracker.raw_position[1] =
+                    value * base.resolution_uniform.data.dimensions[1];
+            }
+            _ if id.starts_with("key_") => self.set_remote_key(id, value >= 0.5),
             _ => return false,
         }
         true
@@ -283,11 +366,33 @@ impl RemoteRuntime {
     fn apply_builtin_string(&mut self, id: &str, value: String) -> bool {
         match id {
             "media_path" | "load_media" => {
-                self.controls_patch.load_media_path = Some(value.into());
+                self.controls_patch.load_media_path = Some(media_path_from_string(value));
                 self.controls_patch.play_video = true;
                 true
             }
             _ => false,
+        }
+    }
+
+    pub fn take_notes(&mut self) -> Vec<(f32, f32)> {
+        std::mem::take(&mut self.remote_notes)
+    }
+
+    pub fn key_down(&self, id: &str) -> bool {
+        self.remote_key_states.get(id).copied().unwrap_or(false)
+    }
+
+    pub fn take_key_events(&mut self) -> Vec<(String, bool)> {
+        std::mem::take(&mut self.remote_key_events)
+    }
+
+    fn set_remote_key(&mut self, id: &str, down: bool) {
+        let changed = self
+            .remote_key_states
+            .insert(id.to_string(), down)
+            .map_or(down, |previous| previous != down);
+        if changed {
+            self.remote_key_events.push((id.to_string(), down));
         }
     }
 
@@ -303,6 +408,7 @@ impl RemoteRuntime {
             "control_clear_buffers" => self.controls_patch.should_clear_buffers = true,
             "media_start_webcam" => self.controls_patch.start_webcam = true,
             "media_stop_webcam" => self.controls_patch.stop_webcam = true,
+            "media_unload" => self.controls_patch.unload_media = true,
             "video_play" => self.controls_patch.play_video = true,
             "video_pause" => self.controls_patch.pause_video = true,
             "video_restart" => self.controls_patch.restart_video = true,
@@ -325,7 +431,7 @@ impl RemoteRuntime {
         for command in remote_control.drain() {
             match command {
                 RemoteCommand::SetF32 { id, value } => {
-                    if !self.apply_builtin_value(&id, value) {
+                    if !self.apply_builtin_value(base, &id, value) {
                         changed |= params.apply_remote_value(&id, RemoteValue::F32(value));
                     }
                 }
@@ -335,6 +441,13 @@ impl RemoteRuntime {
                 RemoteCommand::SetString { id, value } => {
                     if !self.apply_builtin_string(&id, value.clone()) {
                         changed |= params.apply_remote_value(&id, RemoteValue::String(value));
+                    }
+                }
+                RemoteCommand::SetBool { id, value } => {
+                    if id.starts_with("key_") {
+                        self.set_remote_key(&id, value);
+                    } else {
+                        changed |= params.apply_remote_value(&id, RemoteValue::Bool(value));
                     }
                 }
                 RemoteCommand::Transport { bpm, beat, measure } => {
@@ -406,18 +519,39 @@ impl RemoteRuntime {
                     );
                     compute_shader.resize(core, width, height);
                 }
+                RemoteCommand::AudioSpectrum { values } => {
+                    let mut spectrum = [0.0f32; 69];
+                    for (dst, src) in spectrum.iter_mut().zip(values.into_iter()) {
+                        *dst = src.max(0.0);
+                    }
+                    self.remote_audio_spectrum = Some(spectrum);
+                }
                 RemoteCommand::Action { id, value } => {
                     self.apply_action(&id, value);
                 }
                 RemoteCommand::LoadMedia { path } => {
-                    self.controls_patch.load_media_path = Some(path.into());
+                    self.controls_patch.load_media_path = Some(media_path_from_string(path));
                     self.controls_patch.play_video = true;
                 }
-                RemoteCommand::Pulse { .. } | RemoteCommand::Note { .. } => {}
+                RemoteCommand::Note { pitch, velocity } => {
+                    self.remote_notes.push((pitch, velocity));
+                }
+                RemoteCommand::Pulse { .. } => {}
             }
         }
         if changed {
             self.send_values(params);
+        }
+        if let Some(spectrum) = self.remote_audio_spectrum {
+            for i in 0..64 {
+                base.resolution_uniform.data.audio_data[i / 4][i % 4] = spectrum[i];
+            }
+            base.resolution_uniform.data.bpm = spectrum[64];
+            base.resolution_uniform.data.bass_energy = spectrum[65];
+            base.resolution_uniform.data.mid_energy = spectrum[66];
+            base.resolution_uniform.data.high_energy = spectrum[67];
+            base.resolution_uniform.data.total_energy = spectrum[68];
+            compute_shader.update_audio_spectrum(&base.resolution_uniform.data, &core.queue);
         }
         changed
     }
@@ -558,20 +692,22 @@ impl RemoteControl {
         min: f32,
         max: f32,
         default_value: f32,
+        options: Option<&str>,
     ) {
-        self.send_message(
-            "/acuneus/cuneus/param_desc",
-            vec![
-                OscType::Int(index as i32),
-                OscType::String(id.to_string()),
-                OscType::String(label.to_string()),
-                OscType::String(group.to_string()),
-                OscType::String(param_type.to_string()),
-                OscType::Float(min),
-                OscType::Float(max),
-                OscType::Float(default_value),
-            ],
-        );
+        let mut args = vec![
+            OscType::Int(index as i32),
+            OscType::String(id.to_string()),
+            OscType::String(label.to_string()),
+            OscType::String(group.to_string()),
+            OscType::String(param_type.to_string()),
+            OscType::Float(min),
+            OscType::Float(max),
+            OscType::Float(default_value),
+        ];
+        if let Some(options) = options {
+            args.push(OscType::String(options.to_string()));
+        }
+        self.send_message("/acuneus/cuneus/param_desc", args);
     }
 
     pub fn send_discovery(&self, bin_name: &str, params: &[BinParamSpec]) {
@@ -584,6 +720,8 @@ impl RemoteControl {
                 BinParamType::Color3 => "color3",
                 BinParamType::Action => "action",
                 BinParamType::String => "string",
+                BinParamType::Bool => "bool",
+                BinParamType::Select => "select",
             };
             self.send_param_desc(
                 index,
@@ -594,6 +732,7 @@ impl RemoteControl {
                 param.min_value,
                 param.max_value,
                 param.default_value,
+                param.options_str(),
             );
         }
     }
@@ -623,6 +762,10 @@ impl RemoteControl {
             RemoteValue::String(value) => self.send_message(
                 &format!("/acuneus/cuneus/param/{id}"),
                 vec![OscType::String(value)],
+            ),
+            RemoteValue::Bool(value) => self.send_message(
+                &format!("/acuneus/cuneus/param/{id}"),
+                vec![OscType::Bool(value)],
             ),
         }
     }
@@ -673,6 +816,28 @@ impl RemoteControl {
         );
     }
 
+    pub fn has_feedback_target(&self) -> bool {
+        self.feedback
+            .lock()
+            .ok()
+            .and_then(|target| *target)
+            .is_some()
+    }
+
+    pub fn send_audio_pcm(&self, samples: &[f32]) {
+        self.send_message(
+            "/acuneus/cuneus/audio_pcm",
+            vec![OscType::Blob(bytemuck::cast_slice(samples).to_vec())],
+        );
+    }
+
+    pub fn send_audio_spectrum(&self, values: &[f32]) {
+        self.send_message(
+            "/acuneus/cuneus/audio_spectrum",
+            vec![OscType::Blob(bytemuck::cast_slice(values).to_vec())],
+        );
+    }
+
     fn send_message(&self, addr: &str, args: Vec<OscType>) {
         let feedback_enabled = self
             .feedback_enabled
@@ -711,6 +876,13 @@ fn is_osc_packet(bytes: &[u8]) -> bool {
     rosc::decoder::decode_udp(bytes).is_ok()
 }
 
+fn parse_bool_text(value: &str) -> bool {
+    !matches!(
+        value.to_ascii_lowercase().as_str(),
+        "0" | "false" | "off" | "no"
+    )
+}
+
 fn parse_text_command(text: &str) -> Option<RemoteCommand> {
     let mut parts = text.split_whitespace();
     match parts.next()? {
@@ -729,6 +901,10 @@ fn parse_text_command(text: &str) -> Option<RemoteCommand> {
         "set_string" => Some(RemoteCommand::SetString {
             id: parts.next()?.to_string(),
             value: parts.collect::<Vec<_>>().join(" "),
+        }),
+        "set_bool" => Some(RemoteCommand::SetBool {
+            id: parts.next()?.to_string(),
+            value: parts.next().map_or(true, parse_bool_text),
         }),
         "pulse" => Some(RemoteCommand::Pulse {
             velocity: parts.next()?.parse().ok()?,
@@ -774,6 +950,16 @@ fn parse_text_command(text: &str) -> Option<RemoteCommand> {
             width: parts.next()?.parse().ok()?,
             height: parts.next()?.parse().ok()?,
         }),
+        "audio_spectrum" => {
+            let values = parts
+                .filter_map(|value| value.parse::<f32>().ok())
+                .collect::<Vec<_>>();
+            if values.is_empty() {
+                None
+            } else {
+                Some(RemoteCommand::AudioSpectrum { values })
+            }
+        }
         "action" => Some(RemoteCommand::Action {
             id: parts.next()?.to_string(),
             value: parts
@@ -883,6 +1069,15 @@ fn parse_osc_message(message: OscMessage) -> Option<RemoteCommand> {
                 height: osc_u32(args.get(1))?,
             });
         }
+        "/acuneus/cuneus/audio_spectrum" => {
+            let values = args
+                .iter()
+                .filter_map(|arg| osc_f32(Some(arg)))
+                .collect::<Vec<_>>();
+            if !values.is_empty() {
+                return Some(RemoteCommand::AudioSpectrum { values });
+            }
+        }
         "/acuneus/cuneus/action" => {
             return Some(RemoteCommand::Action {
                 id: osc_string(args.first())?,
@@ -902,12 +1097,29 @@ fn parse_osc_message(message: OscMessage) -> Option<RemoteCommand> {
 
     let id = addr
         .strip_prefix("/acuneus/cuneus/param/")
-        .or_else(|| addr.strip_prefix("/acuneus/cuneus/color/"))?;
+        .or_else(|| addr.strip_prefix("/acuneus/cuneus/color/"))
+        .or_else(|| addr.strip_prefix("/acuneus/cuneus/bool/"))
+        .or_else(|| addr.strip_prefix("/acuneus/cuneus/checkbox/"))?;
 
-    if args.first().is_some_and(|arg| matches!(arg, OscType::String(_))) {
+    if args
+        .first()
+        .is_some_and(|arg| matches!(arg, OscType::String(_)))
+    {
         Some(RemoteCommand::SetString {
             id: id.to_string(),
             value: osc_string(args.first())?,
+        })
+    } else if args
+        .first()
+        .is_some_and(|arg| matches!(arg, OscType::Bool(_)))
+        || addr
+            .strip_prefix("/acuneus/cuneus/bool/")
+            .or_else(|| addr.strip_prefix("/acuneus/cuneus/checkbox/"))
+            .is_some()
+    {
+        Some(RemoteCommand::SetBool {
+            id: id.to_string(),
+            value: osc_bool(args.first()).unwrap_or(true),
         })
     } else if args.len() >= 3 {
         Some(RemoteCommand::SetColor3 {

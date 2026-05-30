@@ -28,6 +28,10 @@ acuneus::uniform_params! {
         sample_offset: u32,
         samples_to_generate: u32,
         sample_rate: u32,
+        local_audio_enabled: u32,
+        _padding0: u32,
+        _padding1: u32,
+        _padding2: u32,
         key_states: [[f32; 4]; 3],
         key_decay: [[f32; 4]; 3],
     }
@@ -40,11 +44,40 @@ struct SynthManager {
     remote: acuneus::remote::RemoteRuntime,
     pcm_stream: Option<PcmStreamManager>,
     keys_held: [bool; 9],
+    remote_keys_held: [bool; 9],
     audio_start: std::time::Instant,
     last_samples_generated: u32,
+    samples_written: u64,
 }
 
 impl SynthManager {
+    fn start_pcm_stream() -> Option<PcmStreamManager> {
+        match PcmStreamManager::new(Some(SAMPLE_RATE)) {
+            Ok(mut stream) => {
+                if let Err(e) = stream.start() {
+                    error!("Failed to start PCM stream: {e}");
+                    None
+                } else {
+                    Some(stream)
+                }
+            }
+            Err(e) => {
+                error!("Failed to create PCM stream: {e}");
+                None
+            }
+        }
+    }
+
+    fn sync_local_audio_stream(&mut self) {
+        if self.current_params.local_audio_enabled > 0 {
+            if self.pcm_stream.is_none() {
+                self.pcm_stream = Self::start_pcm_stream();
+            }
+        } else if let Some(mut stream) = self.pcm_stream.take() {
+            let _ = stream.stop();
+        }
+    }
+
     /// key_states stores note-on time (>0 = pressed at this time, 0 = never pressed)
     fn set_key_press_time(&mut self, key_index: usize, time: f32) {
         if key_index < 9 {
@@ -58,11 +91,98 @@ impl SynthManager {
             self.current_params.key_decay[key_index / 4][key_index % 4] = time;
         }
     }
+
+    fn key_index_for_pitch(pitch: f32) -> Option<usize> {
+        let mut offset = pitch.round() as i32 - 60;
+        while offset < 0 {
+            offset += 12;
+        }
+
+        match offset {
+            0 => Some(0),
+            2 => Some(1),
+            4 => Some(2),
+            5 => Some(3),
+            7 => Some(4),
+            9 => Some(5),
+            11 => Some(6),
+            12 => Some(7),
+            14 => Some(8),
+            _ => match offset % 12 {
+                0 => Some(0),
+                2 => Some(1),
+                4 => Some(2),
+                5 => Some(3),
+                7 => Some(4),
+                9 => Some(5),
+                11 => Some(6),
+                _ => None,
+            },
+        }
+    }
+
+    fn set_key_pressed(&mut self, index: usize, current_time: f32) {
+        if index >= 9 {
+            return;
+        }
+
+        let has_previous = self.current_params.key_states[index / 4][index % 4] > 0.0;
+        let in_release = self.current_params.key_decay[index / 4][index % 4] > 0.0;
+        self.keys_held[index] = true;
+        if has_previous && in_release {
+            self.set_key_release_time(index, 0.0);
+        } else {
+            self.set_key_press_time(index, current_time);
+            self.set_key_release_time(index, 0.0);
+        }
+    }
+
+    fn set_key_released(&mut self, index: usize, current_time: f32) {
+        if index >= 9 {
+            return;
+        }
+
+        self.keys_held[index] = false;
+        self.set_key_release_time(index, current_time);
+    }
+
+    fn apply_remote_note(&mut self, pitch: f32, velocity: f32, current_time: f32) {
+        let Some(index) = Self::key_index_for_pitch(pitch) else {
+            return;
+        };
+
+        if velocity > 0.0 {
+            self.set_key_pressed(index, current_time);
+        } else {
+            self.set_key_released(index, current_time);
+        }
+    }
+
+    fn sync_remote_keys(&mut self, current_time: f32) -> bool {
+        let mut changed = false;
+        for index in 0..9 {
+            let id = format!("key_{}", index + 1);
+            let down = self.remote.key_down(&id);
+            if down == self.remote_keys_held[index] {
+                continue;
+            }
+
+            self.remote_keys_held[index] = down;
+            if down {
+                self.set_key_pressed(index, current_time);
+            } else {
+                self.set_key_released(index, current_time);
+            }
+            changed = true;
+        }
+        changed
+    }
 }
 
 impl ShaderManager for SynthManager {
     fn init(core: &Core) -> Self {
         let base = RenderKit::new(core);
+        let remote = acuneus::remote::RemoteRuntime::new("synth", 800, 600);
 
         let initial_params = SynthParams {
             tempo: 120.0,
@@ -85,6 +205,10 @@ impl ShaderManager for SynthManager {
             sample_offset: 0,
             samples_to_generate: MAX_SAMPLES_PER_FRAME,
             sample_rate: SAMPLE_RATE,
+            local_audio_enabled: u32::from(!remote.has_feedback_target()),
+            _padding0: 0,
+            _padding1: 0,
+            _padding2: 0,
             key_states: [[0.0; 4]; 3],
             key_decay: [[0.0; 4]; 3],
         };
@@ -103,30 +227,23 @@ impl ShaderManager for SynthManager {
         let compute_shader = acuneus::compute_shader!(core, "shaders/synth.wgsl", config);
         compute_shader.set_custom_params(initial_params, &core.queue);
 
-        let pcm_stream = match PcmStreamManager::new(Some(SAMPLE_RATE)) {
-            Ok(mut stream) => {
-                if let Err(e) = stream.start() {
-                    error!("Failed to start PCM stream: {e}");
-                    None
-                } else {
-                    Some(stream)
-                }
-            }
-            Err(e) => {
-                error!("Failed to create PCM stream: {e}");
-                None
-            }
+        let pcm_stream = if initial_params.local_audio_enabled > 0 {
+            Self::start_pcm_stream()
+        } else {
+            None
         };
 
         Self {
             base,
             compute_shader,
             current_params: initial_params,
-            remote: acuneus::remote::RemoteRuntime::new("synth", 800, 600),
+            remote,
             pcm_stream,
             keys_held: [false; 9],
+            remote_keys_held: [false; 9],
             audio_start: std::time::Instant::now(),
             last_samples_generated: 0,
+            samples_written: 0,
         }
     }
 
@@ -135,33 +252,37 @@ impl ShaderManager for SynthManager {
         let delta = self.remote.delta();
         self.compute_shader
             .set_time(current_time, delta, &core.queue);
+        self.sync_local_audio_stream();
 
         if let Some(ref mut stream) = self.pcm_stream {
             stream.set_master_volume(self.current_params.volume as f64);
+        }
 
-            // Push previous frame's audio first
-            let prev = self.last_samples_generated;
-            if prev > 0 {
-                if let Ok(audio_data) = pollster::block_on(
-                    self.compute_shader
-                        .read_audio_buffer(&core.device, &core.queue),
-                ) {
-                    let count = (prev * 2) as usize;
-                    if audio_data.len() >= count {
+        let prev = self.last_samples_generated;
+        if prev > 0 {
+            if let Ok(audio_data) = pollster::block_on(
+                self.compute_shader
+                    .read_audio_buffer(&core.device, &core.queue),
+            ) {
+                let count = (prev * 2) as usize;
+                if audio_data.len() >= count {
+                    self.remote.send_audio_pcm(&audio_data[..count]);
+                    if let Some(ref mut stream) = self.pcm_stream {
                         let _ = stream.push_samples(&audio_data[..count]);
                     }
+                    self.samples_written = self.samples_written.saturating_add(prev as u64);
                 }
             }
-
-            // Calculate this frame's needs
-            let elapsed = self.audio_start.elapsed().as_secs_f64();
-            let target_samples = (elapsed * SAMPLE_RATE as f64) as u64;
-            let written = stream.samples_written();
-            let needed = (target_samples.saturating_sub(written) as u32).min(MAX_SAMPLES_PER_FRAME);
-            self.current_params.sample_offset = written as u32;
-            self.current_params.samples_to_generate = needed;
-            self.last_samples_generated = needed;
         }
+
+        let elapsed = self.audio_start.elapsed().as_secs_f64();
+        let target_samples = (elapsed * SAMPLE_RATE as f64) as u64;
+        let written = self.samples_written;
+        let needed = (target_samples.saturating_sub(written) as u32).min(MAX_SAMPLES_PER_FRAME);
+        self.current_params.sample_offset = written as u32;
+        self.current_params.samples_to_generate = needed;
+        self.last_samples_generated = needed;
+
         self.compute_shader
             .set_custom_params(self.current_params, &core.queue);
     }
@@ -203,6 +324,14 @@ impl ShaderManager for SynthManager {
                                 let mut beat_enabled = params.beat_enabled > 0;
                                 if ui.checkbox(&mut beat_enabled, "Background Beat").changed() {
                                     params.beat_enabled = u32::from(beat_enabled);
+                                    changed = true;
+                                }
+                                let mut local_audio_enabled = params.local_audio_enabled > 0;
+                                if ui
+                                    .checkbox(&mut local_audio_enabled, "Local Audio")
+                                    .changed()
+                                {
+                                    params.local_audio_enabled = u32::from(local_audio_enabled);
                                     changed = true;
                                 }
 
@@ -376,9 +505,27 @@ impl ShaderManager for SynthManager {
             params.sample_offset = self.current_params.sample_offset;
             params.samples_to_generate = self.current_params.samples_to_generate;
             params.sample_rate = self.current_params.sample_rate;
+            params.local_audio_enabled = self.current_params.local_audio_enabled;
+            params._padding0 = self.current_params._padding0;
+            params._padding1 = self.current_params._padding1;
+            params._padding2 = self.current_params._padding2;
             params.key_states = self.current_params.key_states;
             params.key_decay = self.current_params.key_decay;
             self.current_params = params;
+        }
+
+        let current_time = self.remote.time(&self.base);
+        let remote_notes = self.remote.take_notes();
+        let had_remote_notes = !remote_notes.is_empty();
+        if had_remote_notes {
+            for (pitch, velocity) in remote_notes {
+                self.apply_remote_note(pitch, velocity, current_time);
+            }
+        }
+        let remote_keys_changed = self.sync_remote_keys(current_time);
+        if had_remote_notes || remote_keys_changed {
+            self.compute_shader
+                .set_custom_params(self.current_params, &core.queue);
         }
 
         self.base.apply_control_request(controls_request);
@@ -411,25 +558,11 @@ impl ShaderManager for SynthManager {
                         if event.state == winit::event::ElementState::Pressed
                             && !self.keys_held[index]
                         {
-                            self.keys_held[index] = true;
-                            let has_previous =
-                                self.current_params.key_states[index / 4][index % 4] > 0.0;
-                            let in_release =
-                                self.current_params.key_decay[index / 4][index % 4] > 0.0;
-                            if has_previous && in_release {
-                                // Retrigger: just cancel the release, note continues from current level
-                                self.set_key_release_time(index, 0.0);
-                            } else {
-                                // Fresh note
-                                self.set_key_press_time(index, current_time);
-                                self.set_key_release_time(index, 0.0);
-                            }
+                            self.set_key_pressed(index, current_time);
                             self.compute_shader
                                 .set_custom_params(self.current_params, &core.queue);
                         } else if event.state == winit::event::ElementState::Released {
-                            self.keys_held[index] = false;
-                            // Store release time — shader ADSR handles the fade
-                            self.set_key_release_time(index, current_time);
+                            self.set_key_released(index, current_time);
                             self.compute_shader
                                 .set_custom_params(self.current_params, &core.queue);
                         }

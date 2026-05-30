@@ -305,7 +305,14 @@ impl ShaderManager for Gaussian3DShader {
         }
 
         let dt = self.remote.delta();
+        let local_keys = self.camera.keys_held.clone();
+        for key in ["w", "a", "s", "d", "q", "e"] {
+            if self.remote.key_down(&format!("key_{key}")) {
+                self.camera.keys_held.insert(key.to_string());
+            }
+        }
         self.camera.apply_held_keys(dt);
+        self.camera.keys_held = local_keys;
         self.update_camera(core);
 
         let current_time = self.remote.time(&self.base);
@@ -342,6 +349,13 @@ impl ShaderManager for Gaussian3DShader {
         changed |= self
             .remote
             .drain(core, &mut self.base, &mut self.preprocess, &mut params);
+        for (id, down) in self.remote.take_key_events() {
+            if id == "key_r" && down {
+                self.camera.reset();
+                self.sorter.force_sort();
+                changed = true;
+            }
+        }
         let mut load_ply_path: Option<std::path::PathBuf> = None;
         let mut should_start_export = false;
         let mut export_request = self.base.export_manager.get_ui_request();

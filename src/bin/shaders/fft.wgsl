@@ -32,6 +32,10 @@ struct FFTParams {
 @group(1) @binding(2) var input_texture: texture_2d<f32>;
 @group(1) @binding(3) var input_sampler: sampler;
 
+// Group 2: incoming audio FFT/spectrum from media, webcam, or Bespoke.
+// Layout: 0..63 frequency bands, 64 BPM, 65 bass, 66 mid, 67 high, 68 total.
+@group(2) @binding(0) var<storage, read> audio_spectrum: array<f32>;
+
 // Storage buffer for FFT data
 @group(3) @binding(0) var<storage, read_write> image_data: array<vec2f>;
 
@@ -520,6 +524,65 @@ fn ifft_vertical(@builtin(workgroup_id) workgroup_id: vec3u, @builtin(local_invo
     }
 }
 
+fn audio_value(f: f32) -> f32 {
+    let idx = clamp(f, 0.0, 0.999) * 64.0;
+    let i = u32(idx);
+    let frac_part = idx - f32(i);
+    let a = audio_spectrum[i];
+    let b = audio_spectrum[min(i + 1u, 63u)];
+    return mix(a, b, frac_part);
+}
+
+fn audio_energy() -> f32 {
+    return max(audio_spectrum[68], max(max(audio_spectrum[65], audio_spectrum[66]), audio_spectrum[67]));
+}
+
+fn render_audio_fft(tc: vec2f, t: f32) -> vec3f {
+    let bass = audio_spectrum[65];
+    let mid = audio_spectrum[66];
+    let high = audio_spectrum[67];
+    let total = audio_spectrum[68];
+
+    var color = vec3f(0.004, 0.006, 0.012) + vec3f(0.015, 0.010, 0.020) * total;
+
+    let band_width = 1.0 / 64.0;
+    let band = clamp(u32(tc.x * 64.0), 0u, 63u);
+    let f = (f32(band) + 0.5) / 64.0;
+    let raw = audio_value(f);
+    let shaped = min(1.0, pow(raw, mix(0.72, 0.48, f)) * mix(1.15, 1.85, f));
+    let bar_top = 0.90 - shaped * 0.74;
+    let bar_bottom = 0.90;
+    let local_x = fract(tc.x / band_width);
+    let in_bar = tc.y >= bar_top && tc.y <= bar_bottom && local_x > 0.16 && local_x < 0.84;
+
+    let hue = vec3f(
+        0.22 + 0.78 * smoothstep(0.00, 0.35, f),
+        0.82 - 0.46 * smoothstep(0.38, 1.00, f),
+        0.45 + 0.55 * smoothstep(0.42, 1.00, f)
+    );
+    if (in_bar) {
+        let y_mix = (bar_bottom - tc.y) / max(bar_bottom - bar_top, 0.001);
+        color = hue * (0.55 + y_mix * 0.95 + shaped * 0.65);
+    }
+
+    let line_y = 0.90 - shaped * 0.74;
+    let line_dist = abs(tc.y - line_y);
+    color += hue * exp(-line_dist * 125.0) * (0.20 + shaped * 0.90);
+
+    let center = vec2f(0.5, 0.48);
+    let p = tc - center;
+    let radius = length(p);
+    let angle = atan2(p.y, p.x) / (2.0 * PI) + 0.5;
+    let radial_band = audio_value(angle);
+    let ring = exp(-abs(radius - (0.18 + radial_band * 0.26)) * 32.0);
+    color += vec3f(high, mid, bass) * ring * (0.22 + total * 0.75);
+
+    let pulse = 0.5 + 0.5 * sin(t * 2.0 * PI * max(audio_spectrum[64] / 60.0, 0.25));
+    color += vec3f(0.06, 0.04, 0.02) * bass * pulse * smoothstep(0.42, 0.0, radius);
+
+    return clamp(color, vec3f(0.0), vec3f(1.0));
+}
+
 //render
 @compute @workgroup_size(16, 16, 1)
 fn main_image(@builtin(global_invocation_id) id: vec3u) {
@@ -530,6 +593,17 @@ fn main_image(@builtin(global_invocation_id) id: vec3u) {
     }
     
     let N = params.resolution;
+    let tc = vec2f(id.xy) / vec2f(dimensions);
+
+    if (audio_energy() > 0.001) {
+        var audio_color = render_audio_fft(tc, time_data.time);
+        if (params.is_bw != 0) {
+            let luminance = dot(audio_color, vec3(0.299, 0.587, 0.114));
+            audio_color = vec3(luminance);
+        }
+        textureStore(output, id.xy, vec4(audio_color, 1.0));
+        return;
+    }
     
     // Calculate position in FFT image (centered)
     var p = vec2i(id.xy) - vec2i(dimensions) / 2 + vec2i(i32(N / 2u));
