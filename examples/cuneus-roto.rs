@@ -189,8 +189,10 @@ impl ShaderManager for RotoShader {
                         }
                     }
                     RemoteCommand::LoadMedia { .. } => {}
-                    RemoteCommand::SetString { .. } => {}
-                    RemoteCommand::Pulse { .. } | RemoteCommand::Note { .. } => {}
+                    RemoteCommand::SetString { .. } | RemoteCommand::SetBool { .. } => {}
+                    RemoteCommand::Pulse { .. }
+                    | RemoteCommand::Note { .. }
+                    | RemoteCommand::AudioSpectrum { .. } => {}
                 }
             }
         }

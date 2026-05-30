@@ -362,17 +362,19 @@ self.compute_shader.dispatch_stage(&mut frame.encoder, core, NEXT_PASS);
 
 Cuneus supports **bidirectional GPU-CPU audio workflows** using two complementary systems:
 
-**1. Audio Visualization (`.with_audio_spectrum()`)** - Analyze loaded audio/video:
+**1. Audio Visualization (`.with_audio_spectrum()`)** - Analyze loaded audio/video or receive host-provided spectrum data:
 - **Flow**: Media file → GStreamer spectrum analyzer → CPU writes to buffer → GPU reads for visualization
+- **Host Flow**: External host audio → `cuneus_set_audio_spectrum` or `/acuneus/cuneus/audio_spectrum` → GPU reads for visualization
 - **Shader Access**: `@group(2) var<storage, read> audio_spectrum: array<f32>` (read-only)
 - **Use Case**: Audio visualizers like `audiovis.rs`
 
 **2. Audio Synthesis (`.with_audio()`)** - Generate music on GPU:
 - **Flow**: GPU computes raw PCM samples per-frame → CPU reads back → `PcmStreamManager` streams to audio output
+- **Host Feedback Flow**: GPU computes raw PCM samples per-frame → CPU reads back → `/acuneus/cuneus/audio_pcm` feedback → host plays audio
 - **Shader Access**: `@group(2) var<storage, read_write> audio_buffer: array<f32>` (read-write)
 - **Use Case**: Music generators like `synth.rs`, `veridisquo.rs`
 
-The shader writes interleaved stereo f32 samples (left, right, left, right...) to the audio buffer. The CPU reads them back each frame and pushes to GStreamer via `PcmStreamManager`. This is per-sample synthesis. you have full control over harmonics, effects, envelopes, anything.
+The shader writes interleaved stereo f32 samples (left, right, left, right...) to the audio buffer. The CPU reads them back each frame. Standalone examples can push samples to GStreamer via `PcmStreamManager`; host-controlled examples can also send the same PCM back to the host as OSC feedback. This is per-sample synthesis. you have full control over harmonics, effects, envelopes, anything.
 
 #### Per-Sample GPU Audio Synthesis
 
@@ -413,6 +415,8 @@ let needed = ((elapsed * 44100.0) as u64 - pcm.samples_written()).min(1024) as u
 params.sample_offset = pcm.samples_written() as u32;
 params.samples_to_generate = needed;
 ```
+
+The `cuneus-synth` example exposes `Local Audio` as a generated checkbox. Standalone runs default it on. When launched from BespokeSynth with a feedback target, it defaults off so audio comes from the Acuneus module's output cable; turn it on if you also want the synth process to play through its own audio device.
 
 **Examples:**
 
@@ -484,7 +488,7 @@ cs.update_channel_texture(0, &tex.view, &tex.sampler, &core.device, &core.queue)
 
 ### Audio Spectrum Analysis (`.with_audio_spectrum()`)
 
-Use `.with_audio_spectrum(69)` to **visualize** audio from loaded media files. GStreamer's spectrum analyzer processes the audio stream and writes frequency data to a GPU buffer that your shader can read.
+Use `.with_audio_spectrum(69)` to **visualize** audio from loaded media files or an external host. GStreamer's spectrum analyzer can process media/webcam audio and write frequency data to a GPU buffer. Hosts can also push the same buffer layout directly through the C ABI or OSC.
 
 - **Buffer Layout**:
   - Indices 0-63: frequency band magnitudes (RMS-normalized)
@@ -494,9 +498,48 @@ Use `.with_audio_spectrum(69)` to **visualize** audio from loaded media files. G
   - Index 67: high energy (pre-computed, ~4000-20000Hz)
   - Index 68: total energy (weighted average)
 - **Shader Access**: `@group(2) var<storage, read> audio_spectrum: array<f32>` (read-only)
-- **Data Source**: Loaded audio/video files (mp3, wav, ogg, mp4, etc.)
+- **Data Source**: Loaded audio/video files (mp3, wav, ogg, mp4, etc.), webcam microphone audio, or host-provided spectrum frames
 - **Features**: RMS-normalized, real-time BPM detection, pre-computed energy bands
 - **Example**: `audiovis.rs` - Spectrum visualizer with beat-synced animations
+
+Host-driven spectrum input uses the same 69-float layout:
+
+```c
+float spectrum[69] = {0};
+// Fill 0..63 with magnitudes, 64 with BPM, 65..68 with energy bands.
+cuneus_set_audio_spectrum(instance, spectrum, 69);
+```
+
+The equivalent text remote command is:
+
+```text
+audio_spectrum <band0> <band1> ... <band63> <bpm> <bass> <mid> <high> <total>
+```
+
+The equivalent OSC address is `/acuneus/cuneus/audio_spectrum` with float arguments. BespokeSynth uses this path for its `acuneus/stableaudio` welcome shortcut: it routes `stableaudio -> acuneus/audiovis -> gain -> output`, passes the audio through, and feeds Audio Visualizer from the Bespoke audio cable.
+
+### Remote Boolean Params
+
+Generated params can be floats, colors, strings, actions, or booleans. Boolean params are useful for toggles such as `beat_enabled`, `local_audio_enabled`, or `use_*` feature flags.
+
+The registry generator treats Rust `bool` fields as boolean params. It also treats `u32` fields as booleans when their names end with `_enabled`, start with `enable_`, or start with `use_`; this matches WGSL-friendly uniforms where toggles are represented as `u32`.
+
+Boolean params can be controlled through any of these paths:
+
+```text
+set_bool local_audio_enabled 1
+/acuneus/cuneus/param/local_audio_enabled true
+/acuneus/cuneus/bool/local_audio_enabled true
+/acuneus/cuneus/checkbox/local_audio_enabled true
+```
+
+In C hosts, use:
+
+```c
+cuneus_set_param_bool(instance, "local_audio_enabled", true);
+```
+
+Hosts that discover params through `/acuneus/cuneus/param_desc` receive the type string `bool`; BespokeSynth renders these as checkboxes.
 
 ### Fonts
 

@@ -131,6 +131,15 @@ impl ShaderManager for VeridisQuo {
         changed |= self
             .remote
             .drain(core, &mut self.base, &mut self.compute_shader, &mut params);
+        for (id, down) in self.remote.take_key_events() {
+            if id == "key_r" && down {
+                self.base.start_time = std::time::Instant::now();
+                if let Some(ref mut stream) = self.pcm_stream {
+                    let _ = stream.stop();
+                    let _ = stream.start();
+                }
+            }
+        }
         let remote_size = self.remote.resolution_size(core);
         let mut controls_request = self.base.controls.get_ui_request(
             &self.base.start_time,

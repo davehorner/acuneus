@@ -6,6 +6,8 @@ pub enum BinParamType {
     Color3,
     Action,
     String,
+    Bool,
+    Select,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -18,6 +20,7 @@ pub struct BinParamSpec {
     pub max_value: f32,
     pub default_value: f32,
     pub flags: u32,
+    pub options: Option<&'static CStr>,
 }
 
 impl BinParamSpec {
@@ -31,6 +34,30 @@ impl BinParamSpec {
 
     pub fn group_str(&self) -> &'static str {
         self.group.to_str().unwrap_or("")
+    }
+
+    pub fn options_str(&self) -> Option<&'static str> {
+        self.options.and_then(|options| options.to_str().ok())
+    }
+}
+
+pub const BIN_FLAG_USES_MOUSE: u32 = 1 << 0;
+pub const BIN_FLAG_USES_KEYBOARD: u32 = 1 << 1;
+
+#[derive(Clone, Copy, Debug)]
+pub struct BinInfo {
+    pub name: &'static CStr,
+    pub title: &'static CStr,
+    pub source_file: &'static CStr,
+    pub default_width: u32,
+    pub default_height: u32,
+    pub flags: u32,
+    pub keys: &'static CStr,
+}
+
+impl BinInfo {
+    pub fn name_str(&self) -> &'static str {
+        self.name.to_str().unwrap_or("")
     }
 }
 
@@ -51,6 +78,7 @@ macro_rules! f32_param {
             max_value: $max,
             default_value: $default,
             flags: 0,
+            options: None,
         }
     };
 }
@@ -66,6 +94,7 @@ macro_rules! color3_param {
             max_value: $max,
             default_value: $default,
             flags: 0,
+            options: None,
         }
     };
 }
@@ -81,6 +110,7 @@ macro_rules! action_param {
             max_value: 1.0,
             default_value: 0.0,
             flags: 1,
+            options: None,
         }
     };
 }
@@ -96,25 +126,107 @@ macro_rules! string_param {
             max_value: 1.0,
             default_value: 0.0,
             flags: 0,
+            options: None,
+        }
+    };
+}
+
+macro_rules! bool_param {
+    ($id:literal, $label:literal, $group:literal, $default:expr) => {
+        BinParamSpec {
+            id: cstr!($id),
+            label: cstr!($label),
+            group: cstr!($group),
+            param_type: BinParamType::Bool,
+            min_value: 0.0,
+            max_value: 1.0,
+            default_value: $default,
+            flags: 0,
+            options: None,
+        }
+    };
+}
+
+macro_rules! select_param {
+    ($id:literal, $label:literal, $group:literal, $min:expr, $max:expr, $default:expr, $options:literal) => {
+        BinParamSpec {
+            id: cstr!($id),
+            label: cstr!($label),
+            group: cstr!($group),
+            param_type: BinParamType::Select,
+            min_value: $min,
+            max_value: $max,
+            default_value: $default,
+            flags: 0,
+            options: Some(cstr!($options)),
         }
     };
 }
 
 pub const ROTO_PARAMS: &[BinParamSpec] = &[
     f32_param!("square_size", "Square Size", "Parameters", 0.05, 0.5, 0.2),
-    f32_param!("circle_radius", "Circle Radius", "Parameters", 0.05, 0.2, 0.11),
-    f32_param!("edge_thickness", "Edge Thickness", "Parameters", 0.001, 0.01, 0.003),
-    f32_param!("animation_speed", "Animation Speed", "Parameters", 1.0, 30.0, 12.0),
-    color3_param!("background_color", "Background Color", "Parameters", 0.0, 1.0, 0.5),
-    f32_param!("edge_color_intensity", "Edge Brightness", "Parameters", 0.1, 2.0, 1.0),
+    f32_param!(
+        "circle_radius",
+        "Circle Radius",
+        "Parameters",
+        0.05,
+        0.2,
+        0.11
+    ),
+    f32_param!(
+        "edge_thickness",
+        "Edge Thickness",
+        "Parameters",
+        0.001,
+        0.01,
+        0.003
+    ),
+    f32_param!(
+        "animation_speed",
+        "Animation Speed",
+        "Parameters",
+        1.0,
+        30.0,
+        12.0
+    ),
+    color3_param!(
+        "background_color",
+        "Background Color",
+        "Parameters",
+        0.0,
+        1.0,
+        0.5
+    ),
+    f32_param!(
+        "edge_color_intensity",
+        "Edge Brightness",
+        "Parameters",
+        0.1,
+        2.0,
+        1.0
+    ),
     f32_param!("control_pause", "Pause", "Transport", 0.0, 1.0, 0.0),
     action_param!("control_reset", "Reset", "Transport"),
     action_param!("control_clear_buffers", "Clear Buffers", "Transport"),
 ];
 
 pub const NEURON2D_PARAMS: &[BinParamSpec] = &[
-    f32_param!("pixel_offset", "Pixel Offset Y", "Neuron Parameters", -3.14, 3.14, -1.0),
-    f32_param!("pixel_offset2", "Pixel Offset X", "Neuron Parameters", -3.14, 3.14, 1.0),
+    f32_param!(
+        "pixel_offset",
+        "Pixel Offset Y",
+        "Neuron Parameters",
+        -3.14,
+        3.14,
+        -1.0
+    ),
+    f32_param!(
+        "pixel_offset2",
+        "Pixel Offset X",
+        "Neuron Parameters",
+        -3.14,
+        3.14,
+        1.0
+    ),
     f32_param!("lights", "Lights", "Neuron Parameters", 0.0, 12.2, 2.2),
     f32_param!("exp", "Exp", "Neuron Parameters", 1.0, 120.0, 4.0),
     f32_param!("frame", "Frame", "Visual Settings", 0.0, 5.2, 1.0),
@@ -128,9 +240,30 @@ pub const NEURON2D_PARAMS: &[BinParamSpec] = &[
 
 pub const AUDIOVIS_PARAMS: &[BinParamSpec] = &[
     f32_param!("red_power", "Red Power", "Visual Parameters", 0.1, 2.0, 0.5),
-    f32_param!("green_power", "Green Power", "Visual Parameters", 0.1, 2.0, 0.5),
-    f32_param!("blue_power", "Blue Power", "Visual Parameters", 0.1, 2.0, 0.5),
-    f32_param!("green_boost", "Green Boost", "Visual Parameters", 0.0, 3.0, 0.5),
+    f32_param!(
+        "green_power",
+        "Green Power",
+        "Visual Parameters",
+        0.1,
+        2.0,
+        0.5
+    ),
+    f32_param!(
+        "blue_power",
+        "Blue Power",
+        "Visual Parameters",
+        0.1,
+        2.0,
+        0.5
+    ),
+    f32_param!(
+        "green_boost",
+        "Green Boost",
+        "Visual Parameters",
+        0.0,
+        3.0,
+        0.5
+    ),
     f32_param!("contrast", "Contrast", "Visual Parameters", 0.1, 3.0, 0.5),
     f32_param!("gamma", "Gamma", "Visual Parameters", 0.1, 3.0, 0.5),
     f32_param!("glow", "Glow", "Visual Parameters", 0.0, 1.0, 0.5),
@@ -156,11 +289,38 @@ pub const BLOCKGAME_PARAMS: &[BinParamSpec] = &[
     f32_param!("block_width", "Block Width", "Parameters", 0.0, 1.0, 0.5),
     f32_param!("block_height", "Block Height", "Parameters", 0.0, 1.0, 0.5),
     f32_param!("block_depth", "Block Depth", "Parameters", 0.0, 1.0, 0.5),
-    f32_param!("movement_speed", "Movement Speed", "Parameters", 0.0, 1.0, 0.5),
-    f32_param!("movement_range", "Movement Range", "Parameters", 0.0, 1.0, 0.5),
-    f32_param!("camera_height", "Camera Height", "Parameters", 0.0, 1.0, 0.5),
+    f32_param!(
+        "movement_speed",
+        "Movement Speed",
+        "Parameters",
+        0.0,
+        1.0,
+        0.5
+    ),
+    f32_param!(
+        "movement_range",
+        "Movement Range",
+        "Parameters",
+        0.0,
+        1.0,
+        0.5
+    ),
+    f32_param!(
+        "camera_height",
+        "Camera Height",
+        "Parameters",
+        0.0,
+        1.0,
+        0.5
+    ),
     f32_param!("camera_angle", "Camera Angle", "Parameters", 0.0, 1.0, 0.5),
     f32_param!("camera_scale", "Camera Scale", "Parameters", 0.0, 1.0, 0.5),
+    f32_param!("key_e", "Key E", "Keys", 0.0, 1.0, 0.0),
+    f32_param!("key_q", "Key Q", "Keys", 0.0, 1.0, 0.0),
+    f32_param!("key_s", "Key S", "Keys", 0.0, 1.0, 0.0),
+    f32_param!("key_w", "Key W", "Keys", 0.0, 1.0, 0.0),
+    f32_param!("mouse_x", "Mouse X", "Mouse", 0.0, 1.0, 0.5),
+    f32_param!("mouse_y", "Mouse Y", "Mouse", 0.0, 1.0, 0.5),
 ];
 
 pub const BUDDHABROT_PARAMS: &[BinParamSpec] = &[
@@ -171,10 +331,31 @@ pub const BUDDHABROT_PARAMS: &[BinParamSpec] = &[
     f32_param!("rotation", "Rotation", "View", -3.14159, 3.14159, 1.55),
     f32_param!("exposure", "Exposure", "Tone Mapping", 0.5, 10.0, 6.5),
     f32_param!("sample_density", "Sample Density", "Fractal", 0.1, 2.0, 0.5),
-    f32_param!("motion_speed", "Motion (clears buf)", "Rendering", 0.0, 1.0, 0.0),
+    f32_param!(
+        "motion_speed",
+        "Motion (clears buf)",
+        "Rendering",
+        0.0,
+        1.0,
+        0.0
+    ),
     f32_param!("dithering", "Dithering", "Tone Mapping", 0.0, 1.0, 0.2),
-    f32_param!("wavelength_min", "Wavelength Min", "Parameters", 0.0, 1.0, 485.0),
-    f32_param!("wavelength_max", "Wavelength Max", "Parameters", 0.0, 1.0, 660.0),
+    f32_param!(
+        "wavelength_min",
+        "Wavelength Min",
+        "Parameters",
+        0.0,
+        1.0,
+        485.0
+    ),
+    f32_param!(
+        "wavelength_max",
+        "Wavelength Max",
+        "Parameters",
+        0.0,
+        1.0,
+        660.0
+    ),
     f32_param!("gamma", "Gamma", "Tone Mapping", 0.2, 2.2, 0.6),
     f32_param!("saturation", "Saturation", "Spectral", 0.0, 3.0, 1.2),
     f32_param!("color_shift", "Color Curve", "Spectral", 0.0, 2.0, 1.1),
@@ -192,10 +373,38 @@ pub const CLIFFORDCOMPUTE_PARAMS: &[BinParamSpec] = &[
     f32_param!("b", "Parameter B", "Attractor Parameters", -3.0, 3.0, 1.7),
     f32_param!("c", "Parameter C", "Attractor Parameters", -3.0, 3.0, 0.6),
     f32_param!("d", "Parameter D", "Attractor Parameters", -3.0, 3.0, 1.2),
-    f32_param!("motion_speed", "Animation Speed", "Visual Settings", 0.0, 3.0, 1.0),
-    f32_param!("rotation_x", "Rotation X", "Visual Settings", -1.0, 1.0, 0.0),
-    f32_param!("rotation_y", "Rotation Y", "Visual Settings", -1.0, 1.0, 0.0),
-    f32_param!("brightness", "Brightness", "Visual Settings", 0.00001, 0.0001, 0.00004),
+    f32_param!(
+        "motion_speed",
+        "Animation Speed",
+        "Visual Settings",
+        0.0,
+        3.0,
+        1.0
+    ),
+    f32_param!(
+        "rotation_x",
+        "Rotation X",
+        "Visual Settings",
+        -1.0,
+        1.0,
+        0.0
+    ),
+    f32_param!(
+        "rotation_y",
+        "Rotation Y",
+        "Visual Settings",
+        -1.0,
+        1.0,
+        0.0
+    ),
+    f32_param!(
+        "brightness",
+        "Brightness",
+        "Visual Settings",
+        0.00001,
+        0.0001,
+        0.00004
+    ),
     f32_param!("color1_r", "Color1 R", "Parameters", 0.0, 1.0, 0.0),
     f32_param!("color1_g", "Color1 G", "Parameters", 0.0, 1.0, 0.7),
     f32_param!("color1_b", "Color1 B", "Parameters", 0.0, 1.0, 1.0),
@@ -204,7 +413,14 @@ pub const CLIFFORDCOMPUTE_PARAMS: &[BinParamSpec] = &[
     f32_param!("color2_b", "Color2 B", "Parameters", 0.0, 1.0, 0.5),
     f32_param!("scale", "Attractor Scale", "Visual Settings", 0.1, 2.0, 0.6),
     f32_param!("dof_amount", "DOF Amount", "Depth of Field", 0.0, 3.0, 1.0),
-    f32_param!("dof_focal_dist", "Focal Distance", "Depth of Field", 0.0, 1.0, 0.5),
+    f32_param!(
+        "dof_focal_dist",
+        "Focal Distance",
+        "Depth of Field",
+        0.0,
+        1.0,
+        0.5
+    ),
     f32_param!("control_pause", "Pause", "Transport", 0.0, 1.0, 0.0),
     action_param!("control_reset", "Reset", "Transport"),
     action_param!("control_clear_buffers", "Clear Buffers", "Transport"),
@@ -212,30 +428,102 @@ pub const CLIFFORDCOMPUTE_PARAMS: &[BinParamSpec] = &[
 
 pub const CNN_PARAMS: &[BinParamSpec] = &[
     f32_param!("brush_size", "Brush Size", "Brush", 0.001, 0.015, 0.5),
-    f32_param!("input_resolution", "Input Resolution", "Parameters", 0.0, 1.0, 0.5),
-    f32_param!("feature_maps_1", "Feature Maps 1", "Parameters", 0.0, 1.0, 0.5),
-    f32_param!("feature_maps_2", "Feature Maps 2", "Parameters", 0.0, 1.0, 0.5),
+    f32_param!(
+        "input_resolution",
+        "Input Resolution",
+        "Parameters",
+        0.0,
+        1.0,
+        0.5
+    ),
+    f32_param!(
+        "feature_maps_1",
+        "Feature Maps 1",
+        "Parameters",
+        0.0,
+        1.0,
+        0.5
+    ),
+    f32_param!(
+        "feature_maps_2",
+        "Feature Maps 2",
+        "Parameters",
+        0.0,
+        1.0,
+        0.5
+    ),
     f32_param!("num_classes", "Num Classes", "Parameters", 0.0, 1.0, 0.5),
-    f32_param!("normalization_mean", "Normalization Mean", "Parameters", 0.0, 1.0, 0.5),
-    f32_param!("normalization_std", "Normalization Std", "Parameters", 0.0, 1.0, 0.5),
-    f32_param!("conv1_pool_size", "Conv1 Pool Size", "Parameters", 0.0, 1.0, 0.5),
-    f32_param!("conv2_pool_size", "Conv2 Pool Size", "Parameters", 0.0, 1.0, 0.5),
+    f32_param!(
+        "normalization_mean",
+        "Normalization Mean",
+        "Parameters",
+        0.0,
+        1.0,
+        0.5
+    ),
+    f32_param!(
+        "normalization_std",
+        "Normalization Std",
+        "Parameters",
+        0.0,
+        1.0,
+        0.5
+    ),
+    f32_param!(
+        "conv1_pool_size",
+        "Conv1 Pool Size",
+        "Parameters",
+        0.0,
+        1.0,
+        0.5
+    ),
+    f32_param!(
+        "conv2_pool_size",
+        "Conv2 Pool Size",
+        "Parameters",
+        0.0,
+        1.0,
+        0.5
+    ),
     f32_param!("control_pause", "Pause", "Transport", 0.0, 1.0, 0.0),
     action_param!("control_reset", "Reset", "Transport"),
     action_param!("control_clear_buffers", "Clear Buffers", "Transport"),
+    f32_param!("mouse_x", "Mouse X", "Mouse", 0.0, 1.0, 0.5),
+    f32_param!("mouse_y", "Mouse Y", "Mouse", 0.0, 1.0, 0.5),
 ];
 
 pub const COMPUTECOLORS_PARAMS: &[BinParamSpec] = &[
     f32_param!("animation_speed", "Speed", "Effects", 0.0, 3.0, 1.0),
     f32_param!("splat_size", "Splat Size", "Particles", 0.1, 2.0, 0.8),
-    f32_param!("particle_spread", "Scramble Amount", "Effects", 0.0, 1.0, 0.0),
+    f32_param!(
+        "particle_spread",
+        "Scramble Amount",
+        "Effects",
+        0.0,
+        1.0,
+        0.0
+    ),
     f32_param!("intensity", "Intensity", "Particles", 0.1, 6.0, 2.0),
     f32_param!("particle_density", "Density", "Particles", 0.1, 1.0, 0.4),
     f32_param!("brightness", "Brightness", "Particles", 36.0, 48.0, 36.0),
-    f32_param!("physics_strength", "Return Force", "Effects", 0.0, 12.0, 0.5),
+    f32_param!(
+        "physics_strength",
+        "Return Force",
+        "Effects",
+        0.0,
+        12.0,
+        0.5
+    ),
     f32_param!("trail_length", "Trail Length", "Flow Trails", 0.0, 2.0, 0.0),
     f32_param!("trail_decay", "Trail Decay", "Flow Trails", 0.8, 1.0, 0.95),
-    f32_param!("flow_strength", "Flow Strength", "Flow Trails", 0.0, 3.0, 1.0),
+    f32_param!(
+        "flow_strength",
+        "Flow Strength",
+        "Flow Trails",
+        0.0,
+        3.0,
+        1.0
+    ),
     string_param!("media_path", "Media Path", "Media"),
     action_param!("media_start_webcam", "Start Webcam", "Media"),
     action_param!("media_stop_webcam", "Stop Webcam", "Media"),
@@ -254,30 +542,107 @@ pub const COMPUTECOLORS_PARAMS: &[BinParamSpec] = &[
 pub const CUNEUS_PARAMS: &[BinParamSpec] = &[
     f32_param!("background_color", "Background", "Colors", 0.0, 1.0, 0.4),
     color3_param!("hue_color", "Hue Color", "Parameters", 0.0, 1.0, 1.0),
-    f32_param!("light_intensity", "Light Intensity", "Lighting", 0.0, 3.2, 1.8),
+    f32_param!(
+        "light_intensity",
+        "Light Intensity",
+        "Lighting",
+        0.0,
+        3.2,
+        1.8
+    ),
     f32_param!("rim_power", "Rim Power", "Lighting", 0.1, 10.0, 3.0),
     f32_param!("ao_strength", "AO Strength", "Lighting", 0.0, 10.0, 0.1),
-    f32_param!("env_light_strength", "Env Light Strength", "Parameters", 0.0, 1.0, 0.5),
+    f32_param!(
+        "env_light_strength",
+        "Env Light Strength",
+        "Parameters",
+        0.0,
+        1.0,
+        0.5
+    ),
     f32_param!("iridescence_power", "Iridescence", "Effects", 0.0, 1.0, 0.2),
-    f32_param!("falloff_distance", "Light Falloff", "Effects", 0.5, 5.0, 1.0),
+    f32_param!(
+        "falloff_distance",
+        "Light Falloff",
+        "Effects",
+        0.5,
+        5.0,
+        1.0
+    ),
     f32_param!("global_light", "Global Light", "Lighting", 0.1, 2.0, 1.0),
-    f32_param!("alpha_threshold", "Alpha Threshold", "Effects", 0.0, 3.0, 1.0),
-    f32_param!("mix_factor_scale", "Mix Factor Scale", "Effects", 0.0, 1.5, 0.3),
+    f32_param!(
+        "alpha_threshold",
+        "Alpha Threshold",
+        "Effects",
+        0.0,
+        3.0,
+        1.0
+    ),
+    f32_param!(
+        "mix_factor_scale",
+        "Mix Factor Scale",
+        "Effects",
+        0.0,
+        1.5,
+        0.3
+    ),
     f32_param!("control_pause", "Pause", "Transport", 0.0, 1.0, 0.0),
     action_param!("control_reset", "Reset", "Transport"),
     action_param!("control_clear_buffers", "Clear Buffers", "Transport"),
 ];
 
 pub const DEBUGSCREEN_PARAMS: &[BinParamSpec] = &[
+    f32_param!("key_5", "Key 5", "Keys", 0.0, 1.0, 0.0),
     f32_param!("control_pause", "Pause", "Transport", 0.0, 1.0, 0.0),
     action_param!("control_reset", "Reset", "Transport"),
     action_param!("control_clear_buffers", "Clear Buffers", "Transport"),
+    f32_param!("mouse_x", "Mouse X", "Mouse", 0.0, 1.0, 0.5),
+    f32_param!("mouse_y", "Mouse Y", "Mouse", 0.0, 1.0, 0.5),
 ];
 
 pub const FFT_PARAMS: &[BinParamSpec] = &[
-    f32_param!("filter_strength", "Filter Strength", "Filter Settings", 0.0, 1.0, 0.3),
-    f32_param!("filter_direction", "Filter Direction", "Parameters", 0.0, 1.0, 0.0),
-    f32_param!("filter_radius", "Filter Radius", "Parameters", 0.0, 1.0, 3.0),
+    select_param!(
+        "filter_type",
+        "Filter Type",
+        "FFT Mode",
+        0.0,
+        3.0,
+        1.0,
+        "0=LP|1=HP|2=BP|3=Directional"
+    ),
+    f32_param!(
+        "filter_strength",
+        "Filter Strength",
+        "Filter Settings",
+        0.0,
+        1.0,
+        0.3
+    ),
+    f32_param!(
+        "filter_direction",
+        "Direction",
+        "FFT Filter",
+        0.0,
+        6.283185,
+        0.0
+    ),
+    f32_param!(
+        "filter_radius",
+        "Band Radius",
+        "FFT Filter",
+        0.0,
+        6.283185,
+        3.0
+    ),
+    select_param!(
+        "resolution",
+        "FFT Resolution",
+        "FFT Mode",
+        256.0,
+        2048.0,
+        1024.0,
+        "256=256|512=512|1024=1024|2048=2048"
+    ),
     string_param!("media_path", "Media Path", "Media"),
     action_param!("media_start_webcam", "Start Webcam", "Media"),
     action_param!("media_stop_webcam", "Stop Webcam", "Media"),
@@ -315,7 +680,14 @@ pub const FLUID_PARAMS: &[BinParamSpec] = &[
     f32_param!("force_count", "Sources", "Vortices", 0.0, 18.0, 6.0),
     f32_param!("contrast", "Contrast", "Display", 0.0, 0.8, 0.15),
     f32_param!("warp_amount", "Warp", "Distortion", 0.5, 5.0, 1.0),
-    f32_param!("flow_intensity", "Flow Intensity", "Distortion", 0.5, 5.0, 1.0),
+    f32_param!(
+        "flow_intensity",
+        "Flow Intensity",
+        "Distortion",
+        0.5,
+        5.0,
+        1.0
+    ),
     f32_param!("color_advect", "Color Advect", "Distortion", 0.0, 3.0, 1.0),
     f32_param!("drift_decay", "Drift Decay", "Distortion", 0.0, 0.05, 0.0),
     f32_param!("dye_intensity", "Intensity", "Glow", 0.0, 2.0, 0.8),
@@ -338,13 +710,27 @@ pub const FLUID_PARAMS: &[BinParamSpec] = &[
 
 pub const GAUSSIAN_PARAMS: &[BinParamSpec] = &[
     f32_param!("learning_rate", "pos LR", "Training", 0.0001, 0.1, 0.5),
-    f32_param!("color_learning_rate", "Color Learning Rate", "Parameters", 0.0, 1.0, 0.5),
+    f32_param!(
+        "color_learning_rate",
+        "Color Learning Rate",
+        "Parameters",
+        0.0,
+        1.0,
+        0.5
+    ),
     f32_param!("temperature", "temp", "Training", 0.1, 5.0, 0.5),
     f32_param!("error_scale", "Error Scale", "vis", 0.5, 10.0, 0.5),
     f32_param!("min_sigma", "Min Sigma", "Advanced", 0.001, 0.05, 0.5),
     f32_param!("max_sigma", "Max Sigma", "Advanced", 0.02, 0.3, 0.5),
     f32_param!("position_noise", "Position", "Advanced", 0.0, 1.0, 0.5),
-    f32_param!("sigma_learning_rate", "Sigma Learning Rate", "Parameters", 0.0, 1.0, 0.5),
+    f32_param!(
+        "sigma_learning_rate",
+        "Sigma Learning Rate",
+        "Parameters",
+        0.0,
+        1.0,
+        0.5
+    ),
     string_param!("media_path", "Media Path", "Media"),
     action_param!("media_start_webcam", "Start Webcam", "Media"),
     action_param!("media_stop_webcam", "Stop Webcam", "Media"),
@@ -361,9 +747,30 @@ pub const GAUSSIAN_PARAMS: &[BinParamSpec] = &[
 ];
 
 pub const GAUSSIAN3D_PARAMS: &[BinParamSpec] = &[
-    f32_param!("gaussian_size", "Gaussian Size", "Visual Settings", 0.1, 2.0, 0.5),
-    f32_param!("scene_scale", "Scene Scale", "Visual Settings", 0.01, 100.0, 0.5),
+    f32_param!(
+        "gaussian_size",
+        "Gaussian Size",
+        "Visual Settings",
+        0.1,
+        2.0,
+        0.5
+    ),
+    f32_param!(
+        "scene_scale",
+        "Scene Scale",
+        "Visual Settings",
+        0.01,
+        100.0,
+        0.5
+    ),
     f32_param!("gamma", "Gamma", "Visual Settings", 0.1, 2.2, 0.5),
+    f32_param!("key_a", "Key A", "Keys", 0.0, 1.0, 0.0),
+    f32_param!("key_d", "Key D", "Keys", 0.0, 1.0, 0.0),
+    f32_param!("key_e", "Key E", "Keys", 0.0, 1.0, 0.0),
+    f32_param!("key_q", "Key Q", "Keys", 0.0, 1.0, 0.0),
+    f32_param!("key_r", "Key R", "Keys", 0.0, 1.0, 0.0),
+    f32_param!("key_s", "Key S", "Keys", 0.0, 1.0, 0.0),
+    f32_param!("key_w", "Key W", "Keys", 0.0, 1.0, 0.0),
     f32_param!("control_pause", "Pause", "Transport", 0.0, 1.0, 0.0),
     action_param!("control_reset", "Reset", "Transport"),
     action_param!("control_clear_buffers", "Clear Buffers", "Transport"),
@@ -377,19 +784,75 @@ pub const JFA_PARAMS: &[BinParamSpec] = &[
     f32_param!("scale", "Scale", "Clifford Attractor", 0.1, 1.0, 0.3),
     f32_param!("n", "Pattern Speed (N)", "JFA Parameters", 0.01, 1.0, 0.1),
     f32_param!("gamma", "Gamma", "Colors", 0.1, 4.0, 2.1),
-    f32_param!("color_intensity", "Color Intensity", "Colors", 0.1, 3.0, 1.0),
+    f32_param!(
+        "color_intensity",
+        "Color Intensity",
+        "Colors",
+        0.1,
+        3.0,
+        1.0
+    ),
     f32_param!("color_r", "Color R", "Parameters", 0.0, 1.0, 1.0),
     f32_param!("color_g", "Color G", "Parameters", 0.0, 1.0, 2.0),
     f32_param!("color_b", "Color B", "Parameters", 0.0, 1.0, 3.0),
     f32_param!("color_w", "Color W", "Colors", 0.0, 10.0, 4.0),
-    f32_param!("accumulation_speed", "Accumulation Speed", "Parameters", 0.0, 1.0, 0.01),
+    f32_param!(
+        "accumulation_speed",
+        "Accumulation Speed",
+        "Parameters",
+        0.0,
+        1.0,
+        0.01
+    ),
     f32_param!("fade_speed", "Fade Speed", "JFA Parameters", 0.9, 1.0, 0.99),
-    f32_param!("freeze_accumulation", "Freeze Accumulation", "Parameters", 0.0, 1.0, 0.0),
-    f32_param!("pattern_floor_add", "Pattern Floor Add", "Parameters", 0.0, 1.0, 1.0),
-    f32_param!("pattern_temp_add", "Pattern Temp Add", "Parameters", 0.0, 1.0, 0.1),
-    f32_param!("pattern_v_offset", "Pattern V Offset", "Parameters", 0.0, 1.0, 0.7),
-    f32_param!("pattern_temp_mul1", "Pattern Temp Mul1", "Parameters", 0.0, 1.0, 0.7),
-    f32_param!("pattern_temp_mul2_3", "Pattern Temp Mul2 3", "Parameters", 0.0, 1.0, 3.0),
+    f32_param!(
+        "freeze_accumulation",
+        "Freeze Accumulation",
+        "Parameters",
+        0.0,
+        1.0,
+        0.0
+    ),
+    f32_param!(
+        "pattern_floor_add",
+        "Pattern Floor Add",
+        "Parameters",
+        0.0,
+        1.0,
+        1.0
+    ),
+    f32_param!(
+        "pattern_temp_add",
+        "Pattern Temp Add",
+        "Parameters",
+        0.0,
+        1.0,
+        0.1
+    ),
+    f32_param!(
+        "pattern_v_offset",
+        "Pattern V Offset",
+        "Parameters",
+        0.0,
+        1.0,
+        0.7
+    ),
+    f32_param!(
+        "pattern_temp_mul1",
+        "Pattern Temp Mul1",
+        "Parameters",
+        0.0,
+        1.0,
+        0.7
+    ),
+    f32_param!(
+        "pattern_temp_mul2_3",
+        "Pattern Temp Mul2 3",
+        "Parameters",
+        0.0,
+        1.0,
+        3.0
+    ),
     f32_param!("control_pause", "Pause", "Transport", 0.0, 1.0, 0.0),
     action_param!("control_reset", "Reset", "Transport"),
     action_param!("control_clear_buffers", "Clear Buffers", "Transport"),
@@ -399,17 +862,59 @@ pub const KUWAHARA_PARAMS: &[BinParamSpec] = &[
     f32_param!("radius", "Radius", "Filter Parameters", 2.0, 16.0, 5.0),
     f32_param!("q", "Q", "Parameters", 0.0, 1.0, 1.5),
     f32_param!("alpha", "Anisotropy", "Filter Parameters", 0.1, 16.0, 4.0),
-    f32_param!("filter_strength", "Filter Strength", "Filter Parameters", 0.0, 16.0, 0.8),
+    f32_param!(
+        "filter_strength",
+        "Filter Strength",
+        "Filter Parameters",
+        0.0,
+        16.0,
+        0.8
+    ),
     f32_param!("sigma_d", "Sigma D", "Parameters", 0.0, 1.0, 0.8),
     f32_param!("sigma_r", "Sigma R", "Parameters", 0.0, 1.0, 1.2),
-    f32_param!("edge_threshold", "Edge Threshold", "Parameters", 0.0, 1.0, 0.2),
-    f32_param!("color_enhance", "Color Filter", "Post-Processing", 0.5, 2.0, 1.0),
+    f32_param!(
+        "edge_threshold",
+        "Edge Threshold",
+        "Parameters",
+        0.0,
+        1.0,
+        0.2
+    ),
+    f32_param!(
+        "color_enhance",
+        "Color Filter",
+        "Post-Processing",
+        0.5,
+        2.0,
+        1.0
+    ),
     f32_param!("blur_samples", "Samples", "Blur Settings", 5.0, 25.0, 15.0),
     f32_param!("blur_lod", "LOD", "Blur Settings", 0.0, 5.0, 2.0),
     f32_param!("blur_slod", "Step", "Blur Settings", 2.0, 5.0, 4.0),
-    f32_param!("lic_length", "Stroke Length", "Brush Strokes (LIC)", 3.0, 40.0, 15.0),
-    f32_param!("lic_strength", "Strength", "Brush Strokes (LIC)", 0.0, 1.0, 0.5),
-    f32_param!("lic_width", "Stroke Width", "Brush Strokes (LIC)", 0.5, 4.0, 1.5),
+    f32_param!(
+        "lic_length",
+        "Stroke Length",
+        "Brush Strokes (LIC)",
+        3.0,
+        40.0,
+        15.0
+    ),
+    f32_param!(
+        "lic_strength",
+        "Strength",
+        "Brush Strokes (LIC)",
+        0.0,
+        1.0,
+        0.5
+    ),
+    f32_param!(
+        "lic_width",
+        "Stroke Width",
+        "Brush Strokes (LIC)",
+        0.5,
+        4.0,
+        1.5
+    ),
     string_param!("media_path", "Media Path", "Media"),
     action_param!("media_start_webcam", "Start Webcam", "Media"),
     action_param!("media_stop_webcam", "Stop Webcam", "Media"),
@@ -463,12 +968,47 @@ pub const LEGO_PARAMS: &[BinParamSpec] = &[
 ];
 
 pub const LICH_PARAMS: &[BinParamSpec] = &[
-    f32_param!("cloud_density", "Seed", "Lightning Parameters", 0.0, 24.0, 3.0),
-    f32_param!("lightning_intensity", "Lightning Intensity", "Parameters", 0.0, 1.0, 1.0),
-    f32_param!("branch_count", "Branch", "Lightning Parameters", 0.0, 2.0, 1.0),
-    f32_param!("feedback_decay", "Decay", "Lightning Parameters", 0.1, 1.5, 0.98),
+    f32_param!(
+        "cloud_density",
+        "Seed",
+        "Lightning Parameters",
+        0.0,
+        24.0,
+        3.0
+    ),
+    f32_param!(
+        "lightning_intensity",
+        "Lightning Intensity",
+        "Parameters",
+        0.0,
+        1.0,
+        1.0
+    ),
+    f32_param!(
+        "branch_count",
+        "Branch",
+        "Lightning Parameters",
+        0.0,
+        2.0,
+        1.0
+    ),
+    f32_param!(
+        "feedback_decay",
+        "Decay",
+        "Lightning Parameters",
+        0.1,
+        1.5,
+        0.98
+    ),
     color3_param!("base_color", "Base Color", "Parameters", 0.0, 1.0, 1.0),
-    f32_param!("color_shift", "Temperature", "Color Settings", 0.1, 20.0, 2.0),
+    f32_param!(
+        "color_shift",
+        "Temperature",
+        "Color Settings",
+        0.1,
+        20.0,
+        2.0
+    ),
     f32_param!("spectrum_mix", "Spectral", "Color Settings", 0.0, 1.0, 0.5),
     f32_param!("control_pause", "Pause", "Transport", 0.0, 1.0, 0.0),
     action_param!("control_reset", "Reset", "Transport"),
@@ -477,11 +1017,39 @@ pub const LICH_PARAMS: &[BinParamSpec] = &[
 
 pub const MANDELBULB_PARAMS: &[BinParamSpec] = &[
     f32_param!("power", "Power", "Mandelbulb", 2.0, 12.0, 4.0),
-    f32_param!("animation_speed", "Animation Speed", "Parameters", 0.0, 1.0, 1.0),
-    f32_param!("hold_duration", "Hold Duration", "Parameters", 0.0, 1.0, 3.0),
-    f32_param!("transition_duration", "Transition Duration", "Parameters", 0.0, 1.0, 3.0),
+    f32_param!(
+        "animation_speed",
+        "Animation Speed",
+        "Parameters",
+        0.0,
+        1.0,
+        1.0
+    ),
+    f32_param!(
+        "hold_duration",
+        "Hold Duration",
+        "Parameters",
+        0.0,
+        1.0,
+        3.0
+    ),
+    f32_param!(
+        "transition_duration",
+        "Transition Duration",
+        "Parameters",
+        0.0,
+        1.0,
+        3.0
+    ),
     f32_param!("exposure", "Exposure", "Render", 0.1, 5.0, 1.0),
-    f32_param!("focal_length", "Focal Length", "Camera&View", 2.0, 20.0, 2.5),
+    f32_param!(
+        "focal_length",
+        "Focal Length",
+        "Camera&View",
+        2.0,
+        20.0,
+        2.5
+    ),
     f32_param!("dof_strength", "DoF", "Camera&View", 0.0, 1.0, 0.04),
     f32_param!("palette_a_r", "Palette A R", "Parameters", 0.0, 1.0, 0.5),
     f32_param!("palette_a_g", "Palette A G", "Parameters", 0.0, 1.0, 0.7),
@@ -515,14 +1083,51 @@ pub const MANDELBULB_PARAMS: &[BinParamSpec] = &[
     f32_param!("control_pause", "Pause", "Transport", 0.0, 1.0, 0.0),
     action_param!("control_reset", "Reset", "Transport"),
     action_param!("control_clear_buffers", "Clear Buffers", "Transport"),
+    f32_param!("mouse_x", "Mouse X", "Mouse", 0.0, 1.0, 0.5),
+    f32_param!("mouse_y", "Mouse Y", "Mouse", 0.0, 1.0, 0.5),
 ];
 
 pub const MATRIX_PARAMS: &[BinParamSpec] = &[
-    f32_param!("red_power", "Red Power", "Matrix Color Settings", 0.5, 3.0, 0.98),
-    f32_param!("green_power", "Green Power", "Matrix Color Settings", 0.5, 3.0, 0.85),
-    f32_param!("blue_power", "Blue Power", "Matrix Color Settings", 0.5, 3.0, 0.9),
-    f32_param!("green_boost", "Green Boost", "Matrix Color Settings", 0.5, 2.0, 1.62),
-    f32_param!("contrast", "Contrast", "Matrix Color Settings", 0.5, 2.0, 1.0),
+    f32_param!(
+        "red_power",
+        "Red Power",
+        "Matrix Color Settings",
+        0.5,
+        3.0,
+        0.98
+    ),
+    f32_param!(
+        "green_power",
+        "Green Power",
+        "Matrix Color Settings",
+        0.5,
+        3.0,
+        0.85
+    ),
+    f32_param!(
+        "blue_power",
+        "Blue Power",
+        "Matrix Color Settings",
+        0.5,
+        3.0,
+        0.9
+    ),
+    f32_param!(
+        "green_boost",
+        "Green Boost",
+        "Matrix Color Settings",
+        0.5,
+        2.0,
+        1.62
+    ),
+    f32_param!(
+        "contrast",
+        "Contrast",
+        "Matrix Color Settings",
+        0.5,
+        2.0,
+        1.0
+    ),
     f32_param!("gamma", "Gamma", "Matrix Color Settings", 0.2, 2.0, 1.0),
     f32_param!("glow", "Glow", "Matrix Color Settings", -1.0, 1.0, 0.05),
     string_param!("media_path", "Media Path", "Media"),
@@ -541,15 +1146,57 @@ pub const MATRIX_PARAMS: &[BinParamSpec] = &[
 ];
 
 pub const NEBULA_PARAMS: &[BinParamSpec] = &[
-    f32_param!("formuparam", "Form Parameter", "Volumetric Parameters", 0.1, 1.0, 0.52),
-    f32_param!("stepsize", "Step Size", "Volumetric Parameters", 0.05, 0.5, 0.31),
+    f32_param!(
+        "formuparam",
+        "Form Parameter",
+        "Volumetric Parameters",
+        0.1,
+        1.0,
+        0.52
+    ),
+    f32_param!(
+        "stepsize",
+        "Step Size",
+        "Volumetric Parameters",
+        0.05,
+        0.5,
+        0.31
+    ),
     f32_param!("zoom", "Zoom", "Volumetric Parameters", 0.1, 112.0, 5.0),
     f32_param!("tile", "Tile", "Volumetric Parameters", 0.1, 3.0, 0.35),
     f32_param!("speed", "Galaxy Speed", "Animation", -0.1, 0.1, 0.02),
-    f32_param!("brightness", "Brightness", "Appearance", 0.0001, 0.015, 0.00062),
-    f32_param!("dust_intensity", "Dust Intensity", "Appearance", 0.0, 2.0, 1.0),
-    f32_param!("distfading", "Distance Fading", "Appearance", 0.1, 3.0, 0.95),
-    f32_param!("color_variation", "Color Variation", "Appearance", 0.2, 5.0, 0.51),
+    f32_param!(
+        "brightness",
+        "Brightness",
+        "Appearance",
+        0.0001,
+        0.015,
+        0.00062
+    ),
+    f32_param!(
+        "dust_intensity",
+        "Dust Intensity",
+        "Appearance",
+        0.0,
+        2.0,
+        1.0
+    ),
+    f32_param!(
+        "distfading",
+        "Distance Fading",
+        "Appearance",
+        0.1,
+        3.0,
+        0.95
+    ),
+    f32_param!(
+        "color_variation",
+        "Color Variation",
+        "Appearance",
+        0.2,
+        5.0,
+        0.51
+    ),
     f32_param!("n_boxes", "N Boxes", "Parameters", 0.0, 1.0, 10.0),
     f32_param!("depth", "Depth", "Parameters", 0.0, 1.0, 5.0),
     f32_param!("rotation_x", "Rotation X", "Parameters", 0.0, 1.0, 0.0),
@@ -568,7 +1215,14 @@ pub const ORBITS_PARAMS: &[BinParamSpec] = &[
     f32_param!("x", "X Position", "Navigation", 0.0, 3.0, 0.5),
     color3_param!("rim_color", "Rim Color", "Parameters", 0.0, 1.0, 0.0),
     f32_param!("y", "Y Position", "Navigation", 0.0, 6.0, 0.5),
-    color3_param!("accent_color", "Accent Color", "Parameters", 0.0, 1.0, 0.018),
+    color3_param!(
+        "accent_color",
+        "Accent Color",
+        "Parameters",
+        0.0,
+        1.0,
+        0.018
+    ),
     f32_param!("gamma_correction", "Gamma", "Rendering", 0.1, 2.0, 0.4),
     f32_param!("travel_speed", "Travel Speed", "Animation", 0.0, 2.0, 1.0),
     f32_param!("col_ext", "Color Extension", "Animation", 0.0, 10.0, 2.0),
@@ -579,22 +1233,66 @@ pub const ORBITS_PARAMS: &[BinParamSpec] = &[
     f32_param!("trap_c1", "Trap Mix", "Traps", 0.0, 1.0, 0.2),
     f32_param!("trap_s1", "Trap Blend", "Traps", 0.0, 2.0, 0.8),
     f32_param!("wave_speed", "Wave Speed", "Animation", 0.0, 2.0, 0.1),
-    f32_param!("fold_intensity", "Fold Intensity", "Animation", 0.0, 3.0, 1.0),
+    f32_param!(
+        "fold_intensity",
+        "Fold Intensity",
+        "Animation",
+        0.0,
+        3.0,
+        1.0
+    ),
     f32_param!("control_pause", "Pause", "Transport", 0.0, 1.0, 0.0),
     action_param!("control_reset", "Reset", "Transport"),
     action_param!("control_clear_buffers", "Clear Buffers", "Transport"),
+    f32_param!("mouse_x", "Mouse X", "Mouse", 0.0, 1.0, 0.5),
+    f32_param!("mouse_y", "Mouse Y", "Mouse", 0.0, 1.0, 0.5),
 ];
 
 pub const PATHTRACING_PARAMS: &[BinParamSpec] = &[
     f32_param!("camera_pos_x", "Camera Pos X", "Parameters", 0.0, 1.0, 0.0),
     f32_param!("camera_pos_y", "Camera Pos Y", "Parameters", 0.0, 1.0, 1.0),
     f32_param!("camera_pos_z", "Camera Pos Z", "Parameters", 0.0, 1.0, 6.0),
-    f32_param!("camera_target_x", "Camera Target X", "Parameters", 0.0, 1.0, 0.0),
-    f32_param!("camera_target_y", "Camera Target Y", "Parameters", 0.0, 1.0, 0.0),
-    f32_param!("camera_target_z", "Camera Target Z", "Parameters", 0.0, 1.0, -1.0),
+    f32_param!(
+        "camera_target_x",
+        "Camera Target X",
+        "Parameters",
+        0.0,
+        1.0,
+        0.0
+    ),
+    f32_param!(
+        "camera_target_y",
+        "Camera Target Y",
+        "Parameters",
+        0.0,
+        1.0,
+        0.0
+    ),
+    f32_param!(
+        "camera_target_z",
+        "Camera Target Z",
+        "Parameters",
+        0.0,
+        1.0,
+        -1.0
+    ),
     f32_param!("fov", "Fov", "Parameters", 0.0, 1.0, 40.0),
-    f32_param!("aperture", "Depth of Field", "Render Settings", 0.0, 0.5, 0.0),
-    f32_param!("rotation_speed", "Animation Speed", "Render Settings", 0.0, 2.0, 0.2),
+    f32_param!(
+        "aperture",
+        "Depth of Field",
+        "Render Settings",
+        0.0,
+        0.5,
+        0.0
+    ),
+    f32_param!(
+        "rotation_speed",
+        "Animation Speed",
+        "Render Settings",
+        0.0,
+        2.0,
+        0.2
+    ),
     f32_param!("exposure", "Exposure", "Render Settings", 0.1, 5.0, 1.5),
     string_param!("media_path", "Media Path", "Media"),
     action_param!("media_start_webcam", "Start Webcam", "Media"),
@@ -609,34 +1307,148 @@ pub const PATHTRACING_PARAMS: &[BinParamSpec] = &[
     f32_param!("control_pause", "Pause", "Transport", 0.0, 1.0, 0.0),
     action_param!("control_reset", "Reset", "Transport"),
     action_param!("control_clear_buffers", "Clear Buffers", "Transport"),
+    f32_param!("mouse_x", "Mouse X", "Mouse", 0.0, 1.0, 0.5),
+    f32_param!("mouse_y", "Mouse Y", "Mouse", 0.0, 1.0, 0.5),
 ];
 
 pub const PHYSARUM_PARAMS: &[BinParamSpec] = &[
-    f32_param!("sensor_angle", "Sensor Angle", "Agent Physics", 0.05, 1.5, 1.5),
-    f32_param!("sensor_dist", "Sensor Distance", "Agent Physics", 1.0, 40.0, 40.0),
+    f32_param!(
+        "sensor_angle",
+        "Sensor Angle",
+        "Agent Physics",
+        0.05,
+        1.5,
+        1.5
+    ),
+    f32_param!(
+        "sensor_dist",
+        "Sensor Distance",
+        "Agent Physics",
+        1.0,
+        40.0,
+        40.0
+    ),
     f32_param!("drag", "Momentum", "Agent Physics", 0.0, 0.99, 0.2),
     f32_param!("move_speed", "Speed", "Agent Physics", 0.1, 5.0, 4.95),
-    f32_param!("decay_rate", "Decay Rate", "Trail Environment", 0.9, 0.999, 0.999),
-    f32_param!("diffuse_rate", "Diffusion Rate", "Trail Environment", 0.0, 1.0, 0.1),
-    f32_param!("deposit_amt", "Deposit Amount", "Trail Environment", 1.0, 30.0, 30.0),
-    f32_param!("random_jitter", "Random Jitter", "Agent Physics", 0.0, 0.5, 0.5),
+    f32_param!(
+        "decay_rate",
+        "Decay Rate",
+        "Trail Environment",
+        0.9,
+        0.999,
+        0.999
+    ),
+    f32_param!(
+        "diffuse_rate",
+        "Diffusion Rate",
+        "Trail Environment",
+        0.0,
+        1.0,
+        0.1
+    ),
+    f32_param!(
+        "deposit_amt",
+        "Deposit Amount",
+        "Trail Environment",
+        1.0,
+        30.0,
+        30.0
+    ),
+    f32_param!(
+        "random_jitter",
+        "Random Jitter",
+        "Agent Physics",
+        0.0,
+        0.5,
+        0.5
+    ),
     f32_param!("rule_seed", "Rule Seed", "Behavior Rule", 0.0, 100.0, 1.0),
-    f32_param!("mutation_scale", "Species Diversity", "Behavior Rule", 0.0, 1.0, 0.3),
+    f32_param!(
+        "mutation_scale",
+        "Species Diversity",
+        "Behavior Rule",
+        0.0,
+        1.0,
+        0.3
+    ),
     f32_param!("force_scale", "Force Scale", "Behavior Rule", 0.0, 3.0, 0.8),
-    f32_param!("sensor_gain", "Sensor Gain", "Behavior Rule", 0.5, 30.0, 5.0),
-    f32_param!("species_attract", "Cross-Attraction", "Species Interaction", 0.0, 1.0, 1.0),
-    f32_param!("species_repel", "Cross-Repulsion", "Species Interaction", 0.0, 1.0, 0.92),
-    f32_param!("strafe_power", "Strafe Power", "Behavior Rule", 0.0, 2.0, 0.15),
-    f32_param!("agent_count_scale", "Agent Count Scale", "Parameters", 0.0, 1.0, 1.0),
+    f32_param!(
+        "sensor_gain",
+        "Sensor Gain",
+        "Behavior Rule",
+        0.5,
+        30.0,
+        5.0
+    ),
+    f32_param!(
+        "species_attract",
+        "Cross-Attraction",
+        "Species Interaction",
+        0.0,
+        1.0,
+        1.0
+    ),
+    f32_param!(
+        "species_repel",
+        "Cross-Repulsion",
+        "Species Interaction",
+        0.0,
+        1.0,
+        0.92
+    ),
+    f32_param!(
+        "strafe_power",
+        "Strafe Power",
+        "Behavior Rule",
+        0.0,
+        2.0,
+        0.15
+    ),
+    f32_param!(
+        "agent_count_scale",
+        "Agent Count Scale",
+        "Parameters",
+        0.0,
+        1.0,
+        1.0
+    ),
     f32_param!("glow_intensity", "Glow", "Rendering", 0.0, 2.0, 0.0),
     f32_param!("color_shift", "Color Shift", "Colors", -0.5, 0.5, -0.02),
     f32_param!("specular_strength", "Specular", "Rendering", 0.0, 1.5, 0.25),
     f32_param!("gamma", "Gamma", "Rendering", 0.1, 2.2, 0.5),
     f32_param!("attractor_count", "Count", "Attractors", 0.0, 8.0, 3.0),
-    f32_param!("attractor_speed", "Orbit Speed", "Attractors", 0.0, 2.0, 0.3),
-    f32_param!("attractor_radius", "Attractor Radius", "Parameters", 0.0, 1.0, 250.0),
-    f32_param!("attractor_strength", "Attractor Strength", "Parameters", 0.0, 1.0, 0.15),
-    f32_param!("color_spread", "Species Hue Spread", "Colors", 0.0, 1.0, 0.3),
+    f32_param!(
+        "attractor_speed",
+        "Orbit Speed",
+        "Attractors",
+        0.0,
+        2.0,
+        0.3
+    ),
+    f32_param!(
+        "attractor_radius",
+        "Attractor Radius",
+        "Parameters",
+        0.0,
+        1.0,
+        250.0
+    ),
+    f32_param!(
+        "attractor_strength",
+        "Attractor Strength",
+        "Parameters",
+        0.0,
+        1.0,
+        0.15
+    ),
+    f32_param!(
+        "color_spread",
+        "Species Hue Spread",
+        "Colors",
+        0.0,
+        1.0,
+        0.3
+    ),
     f32_param!("saturation", "Saturation", "Colors", 0.0, 2.5, 1.58),
     f32_param!("palette_mix", "Palette Mix", "Colors", 0.0, 1.0, 0.57),
     f32_param!("blur_samples", "Feedback Fade", "Rendering", 0.0, 1.0, 0.99),
@@ -650,10 +1462,31 @@ pub const PHYSARUM_PARAMS: &[BinParamSpec] = &[
     f32_param!("color2_g", "Color2 G", "Parameters", 0.0, 1.0, 0.4),
     f32_param!("color2_b", "Color2 B", "Parameters", 0.0, 1.0, 1.0),
     f32_param!("substep", "Substep", "Parameters", 0.0, 1.0, 1.0),
-    f32_param!("total_samples", "Total Samples", "Parameters", 0.0, 1.0, 1.0),
-    f32_param!("wind_strength", "Slipstream Wind", "Agent Physics", 0.0, 3.0, 0.8),
+    f32_param!(
+        "total_samples",
+        "Total Samples",
+        "Parameters",
+        0.0,
+        1.0,
+        1.0
+    ),
+    f32_param!(
+        "wind_strength",
+        "Slipstream Wind",
+        "Agent Physics",
+        0.0,
+        3.0,
+        0.8
+    ),
     f32_param!("turing_scale", "Turing Scale", "Parameters", 0.0, 1.0, 0.0),
-    f32_param!("fluid_blend", "Bubble vs Vein Bias", "Agent Physics", 0.0, 2.0, 0.0),
+    f32_param!(
+        "fluid_blend",
+        "Bubble vs Vein Bias",
+        "Agent Physics",
+        0.0,
+        2.0,
+        0.0
+    ),
     f32_param!("control_pause", "Pause", "Transport", 0.0, 1.0, 0.0),
     action_param!("control_reset", "Reset", "Transport"),
     action_param!("control_clear_buffers", "Clear Buffers", "Transport"),
@@ -664,9 +1497,30 @@ pub const RORSCHACH_PARAMS: &[BinParamSpec] = &[
     f32_param!("zoom", "Zoom", "Shape", 1.0, 10.0, 5.2),
     f32_param!("threshold", "Ink Amount", "Shape", 0.3, 0.6, 0.383),
     f32_param!("distortion", "Warping", "Shape", 0.0, 3.0, 2.63),
-    f32_param!("particle_speed", "Brush Speed", "Particle Tracer", 0.0, 5.0, 0.45),
-    f32_param!("particle_life", "Trail Life", "Particle Tracer", 0.8, 0.999, 0.99),
-    f32_param!("trace_steps", "Density/Steps", "Particle Tracer", 1.0, 100.0, 22.0),
+    f32_param!(
+        "particle_speed",
+        "Brush Speed",
+        "Particle Tracer",
+        0.0,
+        5.0,
+        0.45
+    ),
+    f32_param!(
+        "particle_life",
+        "Trail Life",
+        "Particle Tracer",
+        0.8,
+        0.999,
+        0.99
+    ),
+    f32_param!(
+        "trace_steps",
+        "Density/Steps",
+        "Particle Tracer",
+        1.0,
+        100.0,
+        22.0
+    ),
     f32_param!("contrast", "Contrast", "Visual Settings", 0.5, 6.0, 6.0),
     f32_param!("color_r", "Color R", "Parameters", 0.0, 1.0, 0.58),
     f32_param!("color_g", "Color G", "Parameters", 0.0, 1.0, 0.12),
@@ -679,16 +1533,44 @@ pub const RORSCHACH_PARAMS: &[BinParamSpec] = &[
     f32_param!("tint_z", "Tint Z", "Parameters", 0.0, 1.0, 0.28),
     f32_param!("animate", "Animate", "Parameters", 0.0, 1.0, 0.0),
     f32_param!("turbulence", "Turbulence", "Particle Tracer", 0.0, 3.0, 1.2),
-    f32_param!("evaporation", "Evaporation", "Particle Tracer", 0.9, 1.0, 1.0),
-    f32_param!("light_intensity", "Light Intensity", "Visual Settings", 0.1, 3.0, 1.0),
+    f32_param!(
+        "evaporation",
+        "Evaporation",
+        "Particle Tracer",
+        0.9,
+        1.0,
+        1.0
+    ),
+    f32_param!(
+        "light_intensity",
+        "Light Intensity",
+        "Visual Settings",
+        0.1,
+        3.0,
+        1.0
+    ),
     f32_param!("control_pause", "Pause", "Transport", 0.0, 1.0, 0.0),
     action_param!("control_reset", "Reset", "Transport"),
     action_param!("control_clear_buffers", "Clear Buffers", "Transport"),
 ];
 
 pub const SCENECOLOR_PARAMS: &[BinParamSpec] = &[
-    f32_param!("num_segments", "Segments", "Palette Parameters", 1.0, 64.0, 16.0),
-    f32_param!("palette_height", "Height", "Palette Parameters", 0.05, 0.5, 0.2),
+    f32_param!(
+        "num_segments",
+        "Segments",
+        "Palette Parameters",
+        1.0,
+        64.0,
+        16.0
+    ),
+    f32_param!(
+        "palette_height",
+        "Height",
+        "Palette Parameters",
+        0.05,
+        0.5,
+        0.2
+    ),
     string_param!("media_path", "Media Path", "Media"),
     action_param!("media_start_webcam", "Start Webcam", "Media"),
     action_param!("media_stop_webcam", "Stop Webcam", "Media"),
@@ -716,14 +1598,49 @@ pub const SDVERT_PARAMS: &[BinParamSpec] = &[
     f32_param!("base_color_r", "Base Color R", "Parameters", 0.0, 1.0, 1.0),
     f32_param!("base_color_g", "Base Color G", "Parameters", 0.0, 1.0, 1.0),
     f32_param!("base_color_b", "Base Color B", "Parameters", 0.0, 1.0, 1.0),
-    f32_param!("accent_color_r", "Accent Color R", "Parameters", 0.0, 1.0, 1.0),
-    f32_param!("accent_color_g", "Accent Color G", "Parameters", 0.0, 1.0, 1.0),
-    f32_param!("accent_color_b", "Accent Color B", "Parameters", 0.0, 1.0, 1.0),
+    f32_param!(
+        "accent_color_r",
+        "Accent Color R",
+        "Parameters",
+        0.0,
+        1.0,
+        1.0
+    ),
+    f32_param!(
+        "accent_color_g",
+        "Accent Color G",
+        "Parameters",
+        0.0,
+        1.0,
+        1.0
+    ),
+    f32_param!(
+        "accent_color_b",
+        "Accent Color B",
+        "Parameters",
+        0.0,
+        1.0,
+        1.0
+    ),
     f32_param!("background_r", "Background R", "Parameters", 0.0, 1.0, 0.6),
     f32_param!("background_g", "Background G", "Parameters", 0.0, 1.0, 0.9),
     f32_param!("background_b", "Background B", "Parameters", 0.0, 1.0, 0.9),
-    f32_param!("gamma_correction", "Gamma Correction", "Post-Processing", 0.1, 3.0, 0.41),
-    f32_param!("aces_tonemapping", "ACES Tonemapping", "Post-Processing", 0.0, 2.0, 0.4),
+    f32_param!(
+        "gamma_correction",
+        "Gamma Correction",
+        "Post-Processing",
+        0.1,
+        3.0,
+        0.41
+    ),
+    f32_param!(
+        "aces_tonemapping",
+        "ACES Tonemapping",
+        "Post-Processing",
+        0.0,
+        2.0,
+        0.4
+    ),
     f32_param!("control_pause", "Pause", "Transport", 0.0, 1.0, 0.0),
     action_param!("control_reset", "Reset", "Transport"),
     action_param!("control_clear_buffers", "Clear Buffers", "Transport"),
@@ -742,9 +1659,30 @@ pub const SINH_PARAMS: &[BinParamSpec] = &[
     f32_param!("base_color_r", "Base Color R", "Parameters", 0.0, 1.0, 0.5),
     f32_param!("base_color_g", "Base Color G", "Parameters", 0.0, 1.0, 0.25),
     f32_param!("base_color_b", "Base Color B", "Parameters", 0.0, 1.0, 0.05),
-    f32_param!("light_color_r", "Light Color R", "Parameters", 0.0, 1.0, 0.8),
-    f32_param!("light_color_g", "Light Color G", "Parameters", 0.0, 1.0, 1.0),
-    f32_param!("light_color_b", "Light Color B", "Parameters", 0.0, 1.0, 0.3),
+    f32_param!(
+        "light_color_r",
+        "Light Color R",
+        "Parameters",
+        0.0,
+        1.0,
+        0.8
+    ),
+    f32_param!(
+        "light_color_g",
+        "Light Color G",
+        "Parameters",
+        0.0,
+        1.0,
+        1.0
+    ),
+    f32_param!(
+        "light_color_b",
+        "Light Color B",
+        "Parameters",
+        0.0,
+        1.0,
+        0.3
+    ),
     f32_param!("ambient_r", "Ambient R", "Parameters", 0.0, 1.0, 1.2),
     f32_param!("ambient_g", "Ambient G", "Parameters", 0.0, 1.0, 1.0),
     f32_param!("ambient_b", "Ambient B", "Parameters", 0.0, 1.0, 0.8),
@@ -765,7 +1703,14 @@ pub const SPIRALCHAOS_PARAMS: &[BinParamSpec] = &[
     f32_param!("dof_focal_dist", "Focal Distance", "DOF", 0.0, 3.0, 1.0),
     f32_param!("rotation_x", "X", "Rotation", -1.0, 1.0, 0.0),
     f32_param!("rotation_y", "Y", "Rotation", -1.0, 1.0, 0.0),
-    f32_param!("brightness", "Brightness", "Colors", 0.00001, 0.0001, 0.00004),
+    f32_param!(
+        "brightness",
+        "Brightness",
+        "Colors",
+        0.00001,
+        0.0001,
+        0.00004
+    ),
     f32_param!("color1_r", "Color1 R", "Parameters", 0.0, 1.0, 0.0),
     f32_param!("color1_g", "Color1 G", "Parameters", 0.0, 1.0, 0.7),
     f32_param!("color1_b", "Color1 B", "Parameters", 0.0, 1.0, 1.0),
@@ -781,6 +1726,7 @@ pub const SYNTH_PARAMS: &[BinParamSpec] = &[
     f32_param!("tempo", "Tempo", "Playback", 60.0, 180.0, 120.0),
     f32_param!("octave", "Octave", "Playback", 2.0, 7.0, 4.0),
     f32_param!("volume", "Volume", "Playback", 0.0, 1.0, 0.7),
+    bool_param!("beat_enabled", "Beat Enabled", "Parameters", 0.0),
     f32_param!("reverb_mix", "Reverb", "Effects", 0.0, 0.8, 0.15),
     f32_param!("delay_time", "Delay", "Effects", 0.01, 1.0, 0.3),
     f32_param!("delay_feedback", "Feedback", "Effects", 0.0, 0.8, 0.3),
@@ -793,6 +1739,21 @@ pub const SYNTH_PARAMS: &[BinParamSpec] = &[
     f32_param!("decay_time", "Decay", "Envelope (ADSR)", 0.01, 1.0, 0.15),
     f32_param!("sustain_level", "Sustain", "Envelope (ADSR)", 0.0, 1.0, 0.7),
     f32_param!("release_time", "Release", "Envelope (ADSR)", 0.01, 2.0, 0.4),
+    bool_param!(
+        "local_audio_enabled",
+        "Local Audio Enabled",
+        "Parameters",
+        0.0
+    ),
+    f32_param!("key_1", "Key 1", "Keys", 0.0, 1.0, 0.0),
+    f32_param!("key_2", "Key 2", "Keys", 0.0, 1.0, 0.0),
+    f32_param!("key_3", "Key 3", "Keys", 0.0, 1.0, 0.0),
+    f32_param!("key_4", "Key 4", "Keys", 0.0, 1.0, 0.0),
+    f32_param!("key_5", "Key 5", "Keys", 0.0, 1.0, 0.0),
+    f32_param!("key_6", "Key 6", "Keys", 0.0, 1.0, 0.0),
+    f32_param!("key_7", "Key 7", "Keys", 0.0, 1.0, 0.0),
+    f32_param!("key_8", "Key 8", "Keys", 0.0, 1.0, 0.0),
+    f32_param!("key_9", "Key 9", "Keys", 0.0, 1.0, 0.0),
     f32_param!("control_pause", "Pause", "Transport", 0.0, 1.0, 0.0),
     action_param!("control_reset", "Reset", "Transport"),
     action_param!("control_clear_buffers", "Clear Buffers", "Transport"),
@@ -803,8 +1764,22 @@ pub const SYSTEM_PARAMS: &[BinParamSpec] = &[
     f32_param!("b", "Gradient", "Field Parameters", 0.0, 1.0, 0.0),
     f32_param!("c", "Scale", "Field Parameters", 0.0, 2.0, 0.4),
     f32_param!("dof_amount", "DOF", "Depth of Field", 0.0, 3.0, 0.0),
-    f32_param!("dof_focal_dist", "Focal Distance", "Depth of Field", 0.0, 2.0, 0.96),
-    f32_param!("brightness", "Brightness", "Visuals", 0.00001, 0.0002, 0.00004),
+    f32_param!(
+        "dof_focal_dist",
+        "Focal Distance",
+        "Depth of Field",
+        0.0,
+        2.0,
+        0.96
+    ),
+    f32_param!(
+        "brightness",
+        "Brightness",
+        "Visuals",
+        0.00001,
+        0.0002,
+        0.00004
+    ),
     f32_param!("color1_r", "Color1 R", "Parameters", 0.0, 1.0, 0.2),
     f32_param!("color1_g", "Color1 G", "Parameters", 0.0, 1.0, 0.8),
     f32_param!("color1_b", "Color1 B", "Parameters", 0.0, 1.0, 1.0),
@@ -841,6 +1816,7 @@ pub const TAMEIMP_PARAMS: &[BinParamSpec] = &[
     f32_param!("focal_distance", "Focal Distance", "Cam", 1.0, 10.0, 0.5),
     f32_param!("rotation_x", "Rotation X", "Parameters", 0.0, 1.0, 0.5),
     f32_param!("rotation_y", "Rotation Y", "Parameters", 0.0, 1.0, 0.5),
+    bool_param!("use_hdri", "Use Hdri", "Parameters", 0.0),
     string_param!("media_path", "Media Path", "Media"),
     action_param!("media_start_webcam", "Start Webcam", "Media"),
     action_param!("media_stop_webcam", "Stop Webcam", "Media"),
@@ -857,8 +1833,22 @@ pub const TAMEIMP_PARAMS: &[BinParamSpec] = &[
 ];
 
 pub const TREE_PARAMS: &[BinParamSpec] = &[
-    f32_param!("pixel_offset", "Pixel Offset Y", "Fractal Parameters", -3.14, 3.14, 1.35),
-    f32_param!("pixel_offset2", "Pixel Offset X", "Fractal Parameters", -3.14, 3.14, 1.0),
+    f32_param!(
+        "pixel_offset",
+        "Pixel Offset Y",
+        "Fractal Parameters",
+        -3.14,
+        3.14,
+        1.35
+    ),
+    f32_param!(
+        "pixel_offset2",
+        "Pixel Offset X",
+        "Fractal Parameters",
+        -3.14,
+        3.14,
+        1.0
+    ),
     f32_param!("lights", "Lights", "Fractal Parameters", 0.0, 12.2, 2.2),
     f32_param!("exp", "Exp", "Fractal Parameters", 1.0, 120.0, 4.0),
     f32_param!("frame", "Frame", "Visual Settings", 0.0, 2.2, 0.5),
@@ -874,6 +1864,7 @@ pub const VERIDISQUO_PARAMS: &[BinParamSpec] = &[
     f32_param!("volume", "Volume", "Parameters", 0.0, 1.0, 0.5),
     f32_param!("tempo_multiplier", "Tempo", "Parameters", 0.5, 2.0, 1.0),
     f32_param!("sample_rate", "Sample Rate", "Parameters", 0.0, 1.0, 0.5),
+    f32_param!("key_r", "Key R", "Keys", 0.0, 1.0, 0.0),
     f32_param!("control_pause", "Pause", "Transport", 0.0, 1.0, 0.0),
     action_param!("control_reset", "Reset", "Transport"),
     action_param!("control_clear_buffers", "Clear Buffers", "Transport"),
@@ -881,7 +1872,14 @@ pub const VERIDISQUO_PARAMS: &[BinParamSpec] = &[
 
 pub const VOLUMEPASSAGE_PARAMS: &[BinParamSpec] = &[
     f32_param!("speed", "Speed", "Animation Settings", 0.1, 3.0, 1.0),
-    f32_param!("intensity", "Intensity", "Visual Settings", 0.0001, 0.01, 0.001),
+    f32_param!(
+        "intensity",
+        "Intensity",
+        "Visual Settings",
+        0.0001,
+        0.01,
+        0.001
+    ),
     f32_param!("color1_r", "Color1 R", "Parameters", 0.0, 1.0, 0.1),
     f32_param!("color1_g", "Color1 G", "Parameters", 0.0, 1.0, 0.3),
     f32_param!("color1_b", "Color1 B", "Parameters", 0.0, 1.0, 0.7),
@@ -978,6 +1976,337 @@ pub const BINS: &[&CStr] = &[
     cstr!("volumepassage"),
     cstr!("voronoi"),
 ];
+
+pub const BIN_INFOS: &[BinInfo] = &[
+    BinInfo {
+        name: cstr!("roto"),
+        title: cstr!("rotation_illusion"),
+        source_file: cstr!("cuneus-roto.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("2dneuron"),
+        title: cstr!("2D Neuron"),
+        source_file: cstr!("cuneus-2dneuron.rs"),
+        default_width: 600,
+        default_height: 800,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("audiovis"),
+        title: cstr!("Audio Visualizer"),
+        source_file: cstr!("cuneus-audiovis.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("blockgame"),
+        title: cstr!("Block Tower Game"),
+        source_file: cstr!("cuneus-blockgame.rs"),
+        default_width: 600,
+        default_height: 800,
+        flags: BIN_FLAG_USES_MOUSE | BIN_FLAG_USES_KEYBOARD,
+        keys: cstr!("e|q|s|w"),
+    },
+    BinInfo {
+        name: cstr!("buddhabrot"),
+        title: cstr!("Spectral Buddhabrot"),
+        source_file: cstr!("cuneus-buddhabrot.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("cliffordcompute"),
+        title: cstr!("Clifford"),
+        source_file: cstr!("cuneus-cliffordcompute.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("cnn"),
+        title: cstr!("EMNIST"),
+        source_file: cstr!("cuneus-cnn.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: BIN_FLAG_USES_MOUSE,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("computecolors"),
+        title: cstr!("Particle Splatting"),
+        source_file: cstr!("cuneus-computecolors.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("cuneus"),
+        title: cstr!("cuneus"),
+        source_file: cstr!("cuneus-cuneus.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("debugscreen"),
+        title: cstr!("Debug Screen"),
+        source_file: cstr!("cuneus-debugscreen.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: BIN_FLAG_USES_MOUSE | BIN_FLAG_USES_KEYBOARD,
+        keys: cstr!("5"),
+    },
+    BinInfo {
+        name: cstr!("fft"),
+        title: cstr!("FFT"),
+        source_file: cstr!("cuneus-fft.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("fluid"),
+        title: cstr!("Fluid Simulation"),
+        source_file: cstr!("cuneus-fluid.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("gaussian"),
+        title: cstr!("2D Gaussian Splatting"),
+        source_file: cstr!("cuneus-gaussian.rs"),
+        default_width: 450,
+        default_height: 350,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("gaussian3d"),
+        title: cstr!("3D Gaussian Splatting"),
+        source_file: cstr!("cuneus-gaussian3d.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: BIN_FLAG_USES_KEYBOARD,
+        keys: cstr!("a|d|e|q|r|s|w"),
+    },
+    BinInfo {
+        name: cstr!("jfa"),
+        title: cstr!("JFA"),
+        source_file: cstr!("cuneus-jfa.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("kuwahara"),
+        title: cstr!("Kuwahara Filter"),
+        source_file: cstr!("cuneus-kuwahara.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("lego"),
+        title: cstr!("LEGO Effect"),
+        source_file: cstr!("cuneus-lego.rs"),
+        default_width: 1280,
+        default_height: 720,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("lich"),
+        title: cstr!("Lich Lightning"),
+        source_file: cstr!("cuneus-lich.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("mandelbulb"),
+        title: cstr!("Mandelbulb Path Tracer"),
+        source_file: cstr!("cuneus-mandelbulb.rs"),
+        default_width: 600,
+        default_height: 400,
+        flags: BIN_FLAG_USES_MOUSE,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("matrix"),
+        title: cstr!("matrix"),
+        source_file: cstr!("cuneus-matrix.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("nebula"),
+        title: cstr!("universe"),
+        source_file: cstr!("cuneus-nebula.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("orbits"),
+        title: cstr!("orbits"),
+        source_file: cstr!("cuneus-orbits.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: BIN_FLAG_USES_MOUSE,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("pathtracing"),
+        title: cstr!("Path Tracer"),
+        source_file: cstr!("cuneus-pathtracing.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: BIN_FLAG_USES_MOUSE,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("physarum"),
+        title: cstr!("Physarum Engine"),
+        source_file: cstr!("cuneus-physarum.rs"),
+        default_width: 1280,
+        default_height: 720,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("rorschach"),
+        title: cstr!("Rorschach Tracer"),
+        source_file: cstr!("cuneus-rorschach.rs"),
+        default_width: 700,
+        default_height: 500,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("scenecolor"),
+        title: cstr!("Scene Color Palette"),
+        source_file: cstr!("cuneus-scenecolor.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("sdvert"),
+        title: cstr!("sdvert"),
+        source_file: cstr!("cuneus-sdvert.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("sinh"),
+        title: cstr!("Sinh 3D"),
+        source_file: cstr!("cuneus-sinh.rs"),
+        default_width: 800,
+        default_height: 300,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("spiralchaos"),
+        title: cstr!("Chaos Spiral"),
+        source_file: cstr!("cuneus-spiralchaos.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("synth"),
+        title: cstr!("Synth"),
+        source_file: cstr!("cuneus-synth.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: BIN_FLAG_USES_KEYBOARD,
+        keys: cstr!("1|2|3|4|5|6|7|8|9"),
+    },
+    BinInfo {
+        name: cstr!("system"),
+        title: cstr!("Attractor Universe"),
+        source_file: cstr!("cuneus-system.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("tameimp"),
+        title: cstr!("Currents Path Tracer"),
+        source_file: cstr!("cuneus-tameimp.rs"),
+        default_width: 800,
+        default_height: 800,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("tree"),
+        title: cstr!("Fractal Tree"),
+        source_file: cstr!("cuneus-tree.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("veridisquo"),
+        title: cstr!("Veridis Quo"),
+        source_file: cstr!("cuneus-veridisquo.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: BIN_FLAG_USES_KEYBOARD,
+        keys: cstr!("r"),
+    },
+    BinInfo {
+        name: cstr!("volumepassage"),
+        title: cstr!("Volume Passage"),
+        source_file: cstr!("cuneus-volumepassage.rs"),
+        default_width: 600,
+        default_height: 300,
+        flags: 0,
+        keys: cstr!(""),
+    },
+    BinInfo {
+        name: cstr!("voronoi"),
+        title: cstr!("voronoi"),
+        source_file: cstr!("cuneus-voronoi.rs"),
+        default_width: 800,
+        default_height: 600,
+        flags: 0,
+        keys: cstr!(""),
+    },
+];
+
+pub fn info_for_bin(bin_name: &str) -> Option<&'static BinInfo> {
+    BIN_INFOS.iter().find(|info| info.name_str() == bin_name)
+}
 
 pub fn title_for_bin(bin_name: &str) -> Option<&'static CStr> {
     match bin_name {

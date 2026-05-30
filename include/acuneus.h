@@ -23,6 +23,8 @@ typedef enum CuneusParamType {
     CUNEUS_PARAM_COLOR3 = 1,
     CUNEUS_PARAM_ACTION = 2,
     CUNEUS_PARAM_STRING = 3,
+    CUNEUS_PARAM_BOOL = 4,
+    CUNEUS_PARAM_SELECT = 5,
 } CuneusParamType;
 
 typedef struct CuneusParamDesc {
@@ -34,11 +36,31 @@ typedef struct CuneusParamDesc {
     float max_value;
     float default_value;
     uint32_t flags;
+    const char* options;
 } CuneusParamDesc;
+
+typedef enum CuneusBinFlags {
+    CUNEUS_BIN_USES_MOUSE = 1u << 0,
+    CUNEUS_BIN_USES_KEYBOARD = 1u << 1,
+} CuneusBinFlags;
+
+typedef struct CuneusBinDesc {
+    const char* name;
+    const char* title;
+    const char* source_file;
+    uint32_t default_width;
+    uint32_t default_height;
+    uint32_t flags;
+    const char* keys;
+} CuneusBinDesc;
 
 size_t cuneus_bin_count(void);
 const char* cuneus_bin_name(size_t index);
+CuneusStatus cuneus_bin_desc(size_t index, CuneusBinDesc* out_desc);
 const char* cuneus_bin_title(const char* bin_name);
+const char* cuneus_bin_keys(const char* bin_name);
+bool cuneus_bin_uses_mouse(const char* bin_name);
+bool cuneus_bin_uses_keyboard(const char* bin_name);
 bool cuneus_bin_default_dimensions(const char* bin_name, uint32_t* out_width, uint32_t* out_height);
 
 CuneusInstance* cuneus_instance_open(const char* bin_name, const char* executable_dir, uint16_t remote_port);
@@ -55,6 +77,7 @@ CuneusStatus cuneus_param_desc(CuneusInstance* instance, size_t index, CuneusPar
 CuneusStatus cuneus_set_param_f32(CuneusInstance* instance, const char* id, float value);
 CuneusStatus cuneus_set_param_color3(CuneusInstance* instance, const char* id, float r, float g, float b);
 CuneusStatus cuneus_set_param_string(CuneusInstance* instance, const char* id, const char* value);
+CuneusStatus cuneus_set_param_bool(CuneusInstance* instance, const char* id, bool value);
 CuneusStatus cuneus_trigger_action(CuneusInstance* instance, const char* id, float value);
 CuneusStatus cuneus_load_media(CuneusInstance* instance, const char* path);
 CuneusStatus cuneus_pulse(CuneusInstance* instance, float velocity);
@@ -72,6 +95,7 @@ CuneusStatus cuneus_set_window_size(CuneusInstance* instance, uint32_t width, ui
 CuneusStatus cuneus_set_time(CuneusInstance* instance, float time_seconds);
 CuneusStatus cuneus_set_fps(CuneusInstance* instance, float fps);
 CuneusStatus cuneus_set_resolution(CuneusInstance* instance, uint32_t width, uint32_t height);
+CuneusStatus cuneus_set_audio_spectrum(CuneusInstance* instance, const float* values, size_t count);
 CuneusStatus cuneus_discover(CuneusInstance* instance);
 CuneusStatus cuneus_subscribe(CuneusInstance* instance, bool enabled);
 

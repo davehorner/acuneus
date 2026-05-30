@@ -23,6 +23,8 @@ def parse_wgsl_params(file_path):
             
             if typ == 'f32':
                 fields.append(f'    f32_param!("{name}", "{to_title_case(name)}", 0.0, 1.0, 0.5),')
+            elif typ == 'bool':
+                fields.append(f'    bool_param!("{name}", "{to_title_case(name)}", 0.0),')
             elif typ in ('vec3<f32>', 'vec4<f32>'):
                 fields.append(f'    color3_param!("{name}", "{to_title_case(name)}", 0.0, 1.0, 0.5),')
     return fields

@@ -17,7 +17,10 @@ use egui_wgpu::ScreenDescriptor;
 #[cfg(feature = "media")]
 use log::warn;
 use log::{error, info};
-use std::path::Path;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Instant;
 use winit::event::WindowEvent;
 
@@ -77,10 +80,43 @@ pub struct RenderKit {
     pub hdri_metadata: Option<HdriMetadata>,
     pub hdri_file_data: Option<Vec<u8>>,
     media_error: Option<String>,
+    media_error_path: Option<PathBuf>,
     initial_logical_height: f32,
 }
 
 impl RenderKit {
+    fn normalize_media_path(path_ref: &Path) -> PathBuf {
+        let path_text = path_ref.to_string_lossy();
+        let trimmed = path_text.trim();
+        let unquoted = trimmed
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .or_else(|| {
+                trimmed
+                    .strip_prefix('\'')
+                    .and_then(|value| value.strip_suffix('\''))
+            })
+            .unwrap_or(trimmed);
+
+        if unquoted == path_text {
+            path_ref.to_path_buf()
+        } else {
+            PathBuf::from(unquoted)
+        }
+    }
+
+    fn is_remote_media_uri(path_ref: &Path) -> bool {
+        let path = path_ref.to_string_lossy();
+        let Some(scheme_end) = path.find("://") else {
+            return false;
+        };
+        let scheme = &path[..scheme_end];
+        !scheme.is_empty()
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+    }
+
     const VERTEX_SHADER: &'static str = include_str!("../shaders/vertex.wgsl");
     const BLIT_SHADER: &'static str = include_str!("../shaders/blit.wgsl");
 
@@ -243,6 +279,7 @@ impl RenderKit {
             hdri_metadata: None,
             hdri_file_data: None,
             media_error: None,
+            media_error_path: None,
             initial_logical_height: core.size.height as f32 / core.window().scale_factor() as f32,
         }
     }
@@ -320,11 +357,12 @@ impl RenderKit {
         let context = self.context.clone();
         context.run_ui(raw_input, |ctx| {
             ui_builder(ctx);
-            self.render_media_error_dialog(ctx);
+            self.render_media_error_dialog(core, ctx);
         })
     }
 
     fn set_media_error(&mut self, path: &Path, error: &anyhow::Error) {
+        self.media_error_path = Some(path.to_path_buf());
         self.media_error = Some(format!(
             "Failed to open media:\n{}\n\n{}",
             path.display(),
@@ -332,12 +370,13 @@ impl RenderKit {
         ));
     }
 
-    fn render_media_error_dialog(&mut self, ctx: &egui::Context) {
+    fn render_media_error_dialog(&mut self, core: &Core, ctx: &egui::Context) {
         let Some(error_text) = self.media_error.clone() else {
             return;
         };
 
         let mut should_close = false;
+        let failed_path = self.media_error_path.clone();
         let mut error_display = error_text.clone();
         egui::Window::new("Open Failed")
             .collapsible(false)
@@ -357,6 +396,13 @@ impl RenderKit {
                     if ui.button("Copy Error").clicked() {
                         ui.ctx().copy_text(error_text.clone());
                     }
+                    if let Some(path) = failed_path.as_deref() {
+                        if ui.button("Convert with ffmpeg").clicked() {
+                            if let Err(error) = self.convert_media_with_ffmpeg(core, path) {
+                                self.set_media_error(path, &error);
+                            }
+                        }
+                    }
                     if ui.button("Close").clicked() {
                         should_close = true;
                     }
@@ -365,7 +411,68 @@ impl RenderKit {
 
         if should_close {
             self.media_error = None;
+            self.media_error_path = None;
         }
+    }
+
+    fn converted_media_path(path: &Path) -> PathBuf {
+        if Self::is_remote_media_uri(path) {
+            let mut hasher = DefaultHasher::new();
+            path.to_string_lossy().hash(&mut hasher);
+            return std::env::temp_dir()
+                .join(format!("acuneus_ffmpeg_{:016x}.mp4", hasher.finish()));
+        }
+
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("converted");
+        parent.join(format!("{stem}.acuneus.mp4"))
+    }
+
+    fn convert_media_with_ffmpeg(&mut self, core: &Core, path: &Path) -> anyhow::Result<()> {
+        let output_path = Self::converted_media_path(path);
+        info!(
+            "Converting media with ffmpeg: {:?} -> {:?}",
+            path, output_path
+        );
+
+        let output = Command::new("ffmpeg")
+            .arg("-y")
+            .arg("-i")
+            .arg(path)
+            .args([
+                "-vf",
+                "fps=30,format=rgba,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "18",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                "-f",
+                "mp4",
+            ])
+            .arg(&output_path)
+            .output()
+            .map_err(|error| anyhow::anyhow!("Failed to run ffmpeg: {error}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!(
+                "ffmpeg failed with status {}\n{}",
+                output.status,
+                stderr
+            ));
+        }
+
+        self.load_media(core, &output_path)?;
+        Ok(())
     }
 
     pub fn handle_render_output(
@@ -375,6 +482,9 @@ impl RenderKit {
         full_output: egui::FullOutput,
         encoder: &mut wgpu::CommandEncoder,
     ) {
+        self.egui_state
+            .handle_platform_output(core.window(), full_output.platform_output.clone());
+
         let screen_descriptor = ScreenDescriptor {
             size_in_pixels: [core.config.width, core.config.height],
             pixels_per_point: self.context.pixels_per_point(),
@@ -470,7 +580,7 @@ impl RenderKit {
     }
 
     pub fn load_media<P: AsRef<Path>>(&mut self, core: &Core, path: P) -> anyhow::Result<()> {
-        let path_buf = path.as_ref().to_path_buf();
+        let path_buf = Self::normalize_media_path(path.as_ref());
         let result = self.load_media_inner(core, &path_buf);
         match &result {
             Ok(()) => self.media_error = None,
@@ -486,10 +596,9 @@ impl RenderKit {
             .map(|ext| ext.to_lowercase());
 
         match extension {
-            // Image formats
-            Some(ext)
-                if ["png", "jpg", "jpeg", "bmp", "gif", "tiff", "webp"].contains(&ext.as_str()) =>
-            {
+            // Still image formats. Animated GIFs go through the media pipeline
+            // so their frames advance over time instead of freezing on frame 0.
+            Some(ext) if ["png", "jpg", "jpeg", "bmp", "tiff", "webp"].contains(&ext.as_str()) => {
                 info!("Loading image: {path_ref:?}");
                 match image::open(path_ref) {
                     Ok(img) => {
@@ -546,8 +655,11 @@ impl RenderKit {
             }
             #[cfg(feature = "media")]
             Some(ext)
-                if ["mp4", "avi", "mkv", "mov", "webm", "mp3", "wav", "ogg"]
-                    .contains(&ext.as_str()) =>
+                if [
+                    "gif", "mp4", "avi", "mkv", "mov", "webm", "mp3", "wav", "ogg",
+                ]
+                .contains(&ext.as_str())
+                    || Self::is_remote_media_uri(path_ref) =>
             {
                 info!("Loading video: {path_ref:?}");
                 match VideoTextureManager::new(
@@ -570,6 +682,33 @@ impl RenderKit {
                     }
                     Err(e) => {
                         error!("Failed to load video: {e}");
+                        Err(e)
+                    }
+                }
+            }
+            #[cfg(feature = "media")]
+            _ if Self::is_remote_media_uri(path_ref) => {
+                info!("Loading remote video: {path_ref:?}");
+                match VideoTextureManager::new(
+                    &core.device,
+                    &core.queue,
+                    &self.texture_bind_group_layout,
+                    path_ref,
+                ) {
+                    Ok(video_manager) => {
+                        self.video_texture_manager = Some(video_manager);
+                        self.using_video_texture = true;
+                        self.using_webcam_texture = false;
+                        self.webcam_texture_manager = None;
+                        if let Err(e) = self.play_video() {
+                            warn!("Failed to play video: {e}");
+                        }
+                        self.set_video_loop(true);
+
+                        Ok(())
+                    }
+                    Err(e) => {
+                        error!("Failed to load remote video: {e}");
                         Err(e)
                     }
                 }
@@ -604,6 +743,15 @@ impl RenderKit {
         if let Some(video_manager) = &mut self.video_texture_manager {
             video_manager.pause()?;
         }
+        Ok(())
+    }
+    #[cfg(feature = "media")]
+    pub fn unload_media(&mut self) -> anyhow::Result<()> {
+        if let Some(video_manager) = &mut self.video_texture_manager {
+            let _ = video_manager.pause();
+        }
+        self.using_video_texture = false;
+        self.video_texture_manager = None;
         Ok(())
     }
     #[cfg(feature = "media")]
@@ -863,6 +1011,10 @@ impl RenderKit {
     }
     #[cfg(feature = "media")]
     pub fn handle_video_requests(&mut self, core: &Core, request: &ControlsRequest) {
+        if request.unload_media {
+            let _ = self.unload_media();
+        }
+
         if let Some(path) = &request.load_media_path {
             if let Err(e) = self.load_media(core, path) {
                 error!("Failed to load media: {e}");

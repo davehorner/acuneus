@@ -104,6 +104,11 @@ impl ShaderManager for DebugScreen {
             &mut self.compute_shader,
             &mut remote_params,
         );
+        for (id, down) in self.remote.take_key_events() {
+            if id == "key_5" && down {
+                self.generate_note = !self.generate_note;
+            }
+        }
 
         let remote_size = self.remote.resolution_size(core);
         let mut controls_request = self.base.controls.get_ui_request(

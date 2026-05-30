@@ -64,9 +64,28 @@ The Acuneus module can:
 - Optionally run embedded through the C DLL.
 - Auto reopen when the shader dropdown changes.
 - Show generated parameter sliders with readable labels.
+- Show generated checkbox params for boolean controls.
 - Automate overlay, title bar, window position, scale, time, FPS, and render resolution.
 - Remember per-shader window position, scale, and resolution.
 - Control Bespoke transport bidirectionally for remote-aware shaders such as `roto`.
+- Accept audio from a Bespoke patch cable, pass it through to downstream audio modules, and use that signal to automate shader controls.
+- Feed Bespoke audio into the `audiovis` shader's spectrum buffer so Audio Visualizer bars respond to generated or live Bespoke audio, not only media/webcam audio.
+
+The Bespoke welcome screen includes an `acuneus/stableaudio` shortcut. It creates this patch:
+
+```text
+stableaudio -> acuneus/audio visualizer -> gain -> output
+```
+
+StableAudio is put into auto-generation mode, Acuneus opens the `audiovis` shader, and the Acuneus module sends a 69-value spectrum frame to the shader while passing audio through to `gain`.
+
+The welcome screen also includes an `acuneus/synth` shortcut:
+
+```text
+keyboarddisplay -> acuneus/synth -> gain -> output
+```
+
+Keyboard notes are sent to the Acuneus synth over the remote note path. The synth returns interleaved stereo PCM feedback to Bespoke, and Bespoke plays that PCM from the Acuneus node's audio output cable. The synth exposes a `Local Audio` checkbox: standalone synths start with local audio on, while Bespoke-hosted synths default it off so the audible route is the Bespoke patch. Enable `Local Audio` if you want the synth process to play through its own audio device too.
 
 From the BespokeSynth repo, test with:
 
@@ -93,6 +112,7 @@ CuneusInstance* cuneus_instance_open_with_feedback(
 
 CuneusStatus cuneus_set_param_f32(CuneusInstance* instance, const char* id, float value);
 CuneusStatus cuneus_set_param_color3(CuneusInstance* instance, const char* id, float r, float g, float b);
+CuneusStatus cuneus_set_param_bool(CuneusInstance* instance, const char* id, bool value);
 CuneusStatus cuneus_set_transport(CuneusInstance* instance, float bpm, float beat, float measure);
 
 CuneusStatus cuneus_set_overlay_visible(CuneusInstance* instance, bool visible);
@@ -104,7 +124,12 @@ CuneusStatus cuneus_set_window_size(CuneusInstance* instance, uint32_t width, ui
 CuneusStatus cuneus_set_time(CuneusInstance* instance, float time_seconds);
 CuneusStatus cuneus_set_fps(CuneusInstance* instance, float fps);
 CuneusStatus cuneus_set_resolution(CuneusInstance* instance, uint32_t width, uint32_t height);
+CuneusStatus cuneus_set_audio_spectrum(CuneusInstance* instance, const float* values, size_t count);
 ```
+
+`cuneus_set_audio_spectrum` accepts up to 69 floats. The layout matches `.with_audio_spectrum(69)`: indices `0..63` are frequency magnitudes, index `64` is BPM, and indices `65..68` are bass, mid, high, and total energy.
+
+`cuneus_set_param_bool` is the C ABI path for generated checkbox params. It maps to the text command `set_bool <id> 0|1` and to OSC bool param updates.
 
 On Windows, Acuneus launches child processes without opening a console window. The C DLL can also move and resize out-of-process child windows directly, so host-side window control works even when a shader does not yet implement every remote command internally.
 
@@ -125,6 +150,8 @@ Common incoming OSC addresses:
 /acuneus/cuneus/subscribe
 /acuneus/cuneus/param/<id>
 /acuneus/cuneus/color/<id>
+/acuneus/cuneus/bool/<id>
+/acuneus/cuneus/checkbox/<id>
 /acuneus/cuneus/pulse
 /acuneus/cuneus/note
 /acuneus/cuneus/transport
@@ -139,7 +166,10 @@ Common incoming OSC addresses:
 /acuneus/cuneus/time
 /acuneus/cuneus/fps
 /acuneus/cuneus/resolution
+/acuneus/cuneus/audio_spectrum
 ```
+
+For bool params, send an OSC bool to `/acuneus/cuneus/param/<id>`, `/acuneus/cuneus/bool/<id>`, or `/acuneus/cuneus/checkbox/<id>`. Text remotes can use `set_bool <id> 0|1`.
 
 Common feedback addresses:
 
@@ -149,6 +179,7 @@ Common feedback addresses:
 /acuneus/cuneus/param_count
 /acuneus/cuneus/param_desc
 /acuneus/cuneus/param/<id>
+/acuneus/cuneus/audio_pcm
 /acuneus/cuneus/transport
 /acuneus/cuneus/transport/tempo
 /acuneus/cuneus/transport/play
@@ -165,6 +196,7 @@ The catalog is generated from files in `examples/`. The generator scans each exa
 - The example name.
 - `uniform_params!` fields.
 - Slider labels/ranges/defaults.
+- Boolean fields (`bool`) and bool-like `u32` fields ending in `_enabled`, starting with `enable_`, or starting with `use_`.
 - Color labels.
 - The example's desired default window dimensions from `ShaderApp::new(...)`.
 
