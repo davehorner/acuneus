@@ -223,7 +223,7 @@ fn runner_command(executable_dir: &str, bin_name: &str) -> (PathBuf, bool) {
     }
 
     let mut acuneus = path.clone();
-    acuneus.push("acuneus");
+    acuneus.push("acuneus_runner");
     if cfg!(windows) {
         acuneus.set_extension("exe");
     }

@@ -137,8 +137,9 @@ impl ComputeShader {
             for buffer_spec in &config.storage_buffers {
                 resource_layout.add_storage_buffer(&buffer_spec.name, buffer_spec.size_bytes);
             }
-        } else if config.passes.is_some() && !config.has_atomic_buffer {
-            // Fallback: Multi-pass input textures only if no storage buffers requested
+        } else if config.passes.is_some() {
+            // Fallback: Multi-pass input textures only if no storage buffers requested.
+            // Engine atomics live in group 2 and can coexist with these group 3 bindings.
             resource_layout.add_multipass_input_textures(config.max_input_deps);
         }
 
@@ -273,8 +274,9 @@ impl ComputeShader {
 
         // Step 8: Create multi-pass manager if needed (only for texture ping-pong, not storage buffers)
         let (multipass_manager, pass_dependencies) = if let Some(passes) = &config.passes {
-            if config.storage_buffers.is_empty() && !config.has_atomic_buffer {
-                // Pure multi-pass mode with texture ping-pong: Group 3 managed by MultiPassManager
+            if config.storage_buffers.is_empty() {
+                // Multi-pass mode with texture ping-pong: Group 3 managed by MultiPassManager.
+                // Engine atomics use group 2, so they do not prevent texture dependencies.
                 let buffer_names: Vec<String> = passes.iter().map(|p| p.name.clone()).collect();
                 let dependencies: HashMap<String, Vec<String>> = passes
                     .iter()
@@ -292,7 +294,7 @@ impl ComputeShader {
 
                 (Some(manager), Some(dependencies))
             } else {
-                // Multi-pass with storage or engine atomic buffers: no texture ping-pong needed.
+                // Multi-pass with storage buffers: no texture ping-pong needed.
                 // Passes share explicit buffers instead of Group 3 input textures.
                 let dependencies: HashMap<String, Vec<String>> = passes
                     .iter()
@@ -521,13 +523,15 @@ impl ComputeShader {
             binding: 0,
             resource: wgpu::BindingResource::TextureView(&storage_view),
         }];
+        let mut binding_counter = 1;
 
         // Add custom uniform if present
         if let (Some(buffer), Some(_size)) = (custom_uniform_buffer, custom_uniform_size) {
             entries.push(wgpu::BindGroupEntry {
-                binding: 1, // Custom uniforms go to binding 1 in Group 1
+                binding: binding_counter,
                 resource: buffer.as_entire_binding(),
             });
+            binding_counter += 1;
         }
 
         // Add input texture and sampler if present (for shaders like FFT): again, this still not "perfect" and generic but let me think more
@@ -535,11 +539,12 @@ impl ComputeShader {
             // Input textures should always be provided - if not, there's an architecture issue
             if let (Some(view), Some(sampler)) = (input_texture_view, input_sampler) {
                 entries.push(wgpu::BindGroupEntry {
-                    binding: 2, // Input texture goes to binding 2
+                    binding: binding_counter,
                     resource: wgpu::BindingResource::TextureView(view),
                 });
+                binding_counter += 1;
                 entries.push(wgpu::BindGroupEntry {
-                    binding: 3, // Input sampler goes to binding 3
+                    binding: binding_counter,
                     resource: wgpu::BindingResource::Sampler(sampler),
                 });
             } else {
@@ -929,9 +934,44 @@ impl ComputeShader {
 
         compute_pass.set_pipeline(pipeline);
 
+        let write_side = self
+            .multipass_manager
+            .as_ref()
+            .map(|m| m.get_write_side(entry_point))
+            .unwrap_or(false);
+        let group3_key =
+            if let (Some(multipass), Some(dependencies)) = (&self.multipass_manager, &self.pass_dependencies) {
+                let empty_deps = Vec::new();
+                let deps = dependencies.get(entry_point).unwrap_or(&empty_deps);
+                let first_buf = multipass
+                    .first_buffer_name()
+                    .cloned()
+                    .unwrap_or_else(|| "main".to_string());
+                let mut key = 0usize;
+                for i in 0..self.max_input_deps {
+                    let buf_name = if deps.is_empty() {
+                        &first_buf
+                    } else {
+                        deps.get(i).unwrap_or(&deps[0])
+                    };
+                    if multipass.get_write_side(buf_name) {
+                        key |= 1 << i;
+                    }
+                }
+                Some(key)
+            } else {
+                None
+            };
+
         // Set bind groups following the 4-group convention
         compute_pass.set_bind_group(0, &self.group0_bind_group, &[]); // Per-frame
-        compute_pass.set_bind_group(1, &self.group1_bind_group, &[]); // Primary I/O
+        if entry_point == "main_image" {
+            compute_pass.set_bind_group(1, &self.group1_bind_group, &[]); // Primary I/O
+        } else if let Some(cached) = self.cached_intermediate_group1.get(entry_point) {
+            compute_pass.set_bind_group(1, &cached[write_side as usize], &[]);
+        } else {
+            compute_pass.set_bind_group(1, &self.group1_bind_group, &[]); // Primary I/O
+        }
 
         // Group 2: Engine resources
         if let Some(ref group2) = self.group2_bind_group {
@@ -940,8 +980,12 @@ impl ComputeShader {
             compute_pass.set_bind_group(2, empty_group2, &[]);
         }
 
-        // Group 3: User data
-        if let Some(ref group3) = self.group3_bind_group {
+        // Group 3: User data / multi-pass dependencies
+        if let (Some(cached), Some(key)) =
+            (self.cached_input_group3.get(entry_point), group3_key)
+        {
+            compute_pass.set_bind_group(3, &cached[key], &[]);
+        } else if let Some(ref group3) = self.group3_bind_group {
             compute_pass.set_bind_group(3, group3, &[]);
         } else if let Some(empty_group3) = self.empty_bind_groups.get(&3) {
             compute_pass.set_bind_group(3, empty_group3, &[]);
@@ -1485,11 +1529,28 @@ impl ComputeShader {
                             binding: 0,
                             resource: wgpu::BindingResource::TextureView(&view),
                         }];
+                        let mut binding_counter = 1;
                         if let Some(ref uniform_buffer) = self.custom_uniform {
                             entries.push(wgpu::BindGroupEntry {
-                                binding: 1,
+                                binding: binding_counter,
                                 resource: uniform_buffer.as_entire_binding(),
                             });
+                            binding_counter += 1;
+                        }
+                        if self.has_input_texture {
+                            if let Some(placeholder) = self.placeholder_input_texture.as_ref() {
+                                entries.push(wgpu::BindGroupEntry {
+                                    binding: binding_counter,
+                                    resource: wgpu::BindingResource::TextureView(&placeholder.view),
+                                });
+                                binding_counter += 1;
+                                entries.push(wgpu::BindGroupEntry {
+                                    binding: binding_counter,
+                                    resource: wgpu::BindingResource::Sampler(&placeholder.sampler),
+                                });
+                            } else {
+                                log::error!("Input texture required but no placeholder texture exists for cached multi-pass bind group");
+                            }
                         }
                         device.create_bind_group(&wgpu::BindGroupDescriptor {
                             label: Some(&format!("{entry_point} Cached Group1 (side={idx})")),

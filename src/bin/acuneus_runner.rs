@@ -1,10 +1,11 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = env_logger::try_init();
+    const DISPLAY_NAME: &str = "acuneus_runner";
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        eprintln!("usage: acuneus [shader]");
-        eprintln!("example: acuneus roto");
+        eprintln!("usage: {DISPLAY_NAME} [shader]");
+        eprintln!("example: {DISPLAY_NAME} roto");
         return Ok(());
     }
 
